@@ -42,18 +42,27 @@ pub async fn build_timelines(client: &Client, target_path: String, scenes: Vec<S
             let visual_path = format!("{}/scene_{}.png", visual_root, scene.scene_id);
             let audio_path = format!("{}/scene_{}.mp3", audio_root, scene.scene_id);
 
-            generate_scene_visual(
-                &client,
-                &visual_path,
-                &scene.visual_prompt,
-            ).await?;
+            // Skip assets that already exist so a retry doesn't re-spend API credits.
+            if tokio::fs::try_exists(&visual_path).await.unwrap_or(false) {
+                println!("🔧[Builder] Scene {} image already exists", scene.scene_id);
+            } else {
+                generate_scene_visual(
+                    &client,
+                    &visual_path,
+                    &scene.visual_prompt,
+                ).await?;
+            }
 
-            generate_scene_audio(
-                &client,
-                &audio_path,
-                &voice_mode,
-                &scene.voice_segments,
-            ).await?;
+            if tokio::fs::try_exists(&audio_path).await.unwrap_or(false) {
+                println!("🔧[Builder] Scene {} audio already exists", scene.scene_id);
+            } else {
+                generate_scene_audio(
+                    &client,
+                    &audio_path,
+                    &voice_mode,
+                    &scene.voice_segments,
+                ).await?;
+            }
 
             let duration = get_audio_duration(&audio_path).await.map_err(|e| e.to_string())?;
 

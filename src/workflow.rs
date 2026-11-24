@@ -109,21 +109,25 @@ pub async fn run_agent_workflow(
                     let resp = build_content(client, &system, &user, true).await?;
                     let parsed: Value = serde_json::from_str(&resp).map_err(|e| ctx("JSON parse", e))?;
                     
-                    state.target_topic = parsed["topic"].as_str().unwrap().to_string();
-                    state.main_character = parsed["main_character"].as_str().unwrap().to_string();
-                    state.spotlight_characters =  parsed["spotlight_characters"]
-                        .as_array()
-                        .unwrap()
+                    state.target_topic = json_str(&parsed, "topic")?;
+                    state.main_character = json_str(&parsed, "main_character")?;
+                    state.spotlight_characters = json_str_array(&parsed, "spotlight_characters")?;
+                    state.supporting_characters = json_str_array(&parsed, "supporting_characters")?;
+
+                    // Validate casting against known characters so a hallucinated name
+                    // triggers a retry instead of a panic in the Writer.
+                    let known = |name: &str| EDU_CHARACTERS.iter().any(|c| c.enabled && c.name == name);
+                    if !EDU_CHARACTERS.iter().any(|c| c.enabled && c.spotlight && c.name == state.main_character) {
+                        return Err(ctx("Planner", format!("Unknown main character: {}", state.main_character)));
+                    }
+                    if let Some(bad) = state.spotlight_characters
                         .iter()
-                        .map(|v| v.as_str().unwrap().to_string())
-                        .collect();
-                    state.supporting_characters =  parsed["supporting_characters"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|v| v.as_str().unwrap().to_string())
-                        .collect();
-                    
+                        .chain(state.supporting_characters.iter())
+                        .find(|n| !known(n))
+                    {
+                        return Err(ctx("Planner", format!("Unknown character: {}", bad)));
+                    }
+
                     println!("🧠[Planner] Topic will be \"{}\"", state.target_topic);
                     
                     state.current_node = AgentNode::Writer;
@@ -136,7 +140,7 @@ pub async fn run_agent_workflow(
                     let main_char = EDU_CHARACTERS
                         .iter()
                         .find(|c| c.name == state.main_character)
-                        .unwrap();
+                        .ok_or_else(|| ctx("Writer", format!("Unknown main character: {}", state.main_character)))?;
 
                     let spotlight_set: HashSet<&str> = state.spotlight_characters
                         .iter()
@@ -334,7 +338,9 @@ pub async fn run_agent_workflow(
 
                 AgentNode::Builder => {
                     println!("🔧[Builder] Generating assets...");
-                    let artifact = state.final_json.as_ref().unwrap();
+                    let artifact = state.final_json
+                        .as_ref()
+                        .ok_or_else(|| ctx("Builder", "Missing script artifact"))?;
 
                     let timelines = build_timelines(
                         &client,
@@ -345,6 +351,7 @@ pub async fn run_agent_workflow(
 
                     state.video_timelines = timelines;
                     state.current_node = AgentNode::Renderer;
+                    let _ = db.save_state(&state.reset()).await;
                 }
 
                 AgentNode::Renderer => {
@@ -391,8 +398,30 @@ pub async fn run_agent_workflow(
                 }
 
                 AgentNode::End => {
-                    return Ok(state.final_json.clone().unwrap());
+                    return state.final_json
+                        .clone()
+                        .ok_or_else(|| ctx("End", "Missing script artifact"));
                 }
             };
         }
+}
+
+fn json_str(v: &Value, key: &str) -> Result<String, String> {
+    v[key]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| ctx("JSON", format!("Missing string field '{}'", key)))
+}
+
+fn json_str_array(v: &Value, key: &str) -> Result<Vec<String>, String> {
+    v[key]
+        .as_array()
+        .ok_or_else(|| ctx("JSON", format!("Missing array field '{}'", key)))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| ctx("JSON", format!("Non-string item in '{}'", key)))
+        })
+        .collect()
 }
