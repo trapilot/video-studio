@@ -19,6 +19,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub services: Arc<Services>,
     pub config: Arc<config::Config>,
+    /// Profile for new workflows (`STUDIO_PROFILE`). Running workflows use their own.
+    pub profile: &'static entities::StudioProfile,
 }
 
 pub struct Services {
@@ -28,7 +30,7 @@ pub struct Services {
 }
 
 impl AppState {
-    pub async fn build() -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn build(profile: &'static entities::StudioProfile) -> Result<Self, Box<dyn std::error::Error>> {
         let db = Arc::new(db::DbManager::new("data_history.db").await?);
 
         let providers = Arc::new(provider::ProviderManager::new());
@@ -63,6 +65,7 @@ impl AppState {
         Ok(Self {
             services,
             config: Arc::new(config::build_config()),
+            profile,
         })
     }
 }
@@ -70,9 +73,21 @@ impl AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {   
     dotenvy::dotenv().ok(); 
-    println!("🚀 Video Studio v{}", env!("CARGO_PKG_VERSION"));
+    let data_dir = std::env::var("STUDIO_DATA_DIR")
+        .unwrap_or_else(|_| entities::character::DEFAULT_DATA_DIR.to_string());
+    entities::character::init(&data_dir)?;
+    let profile = entities::active_profile()?;
 
-    let state = Arc::new(AppState::build().await?);
+    let cast = profile.enabled_cast().map(|c| c.name.as_str()).collect::<Vec<_>>();
+    println!(
+        "🚀 Video Studio v{} | profile: {} ({}) | cast: {}",
+        env!("CARGO_PKG_VERSION"),
+        profile.id,
+        profile.name,
+        if cast.is_empty() { "narrator only".to_string() } else { cast.join(", ") },
+    );
+
+    let state = Arc::new(AppState::build(profile).await?);
 
     if !oauth::has_auth_token(&state.services.db).await {
         oauth::start_oauth_server(&state.services.db).await;

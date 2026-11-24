@@ -16,6 +16,7 @@ pub struct PublisherAgent;
 impl Agent for PublisherAgent {
     async fn run(&self, state: &Arc<AppState>, job: &Job) -> Result<(), AgentError> {
         println!("📤 [Publisher] Publishing video...");
+        let profile = job_profile(state, job).await?;
         
         let video_metadata: VideoMetadata =
             serde_json::from_str(&job.payload)
@@ -23,9 +24,10 @@ impl Agent for PublisherAgent {
 
         let mut configs = HashMap::new();
         configs.insert(uploader::Channel::Youtube, uploader::ChannelConfig::Youtube {
-            category_id: state.config.movie.youtube_category.clone(),
-            tags: state.config.movie.default_tags.clone(),
-            description: state.config.movie.default_description.clone(),
+            category_id: profile.publish.youtube_category.to_string(),
+            tags: profile.publish.tags.iter().map(|t| t.to_string()).collect(),
+            description: profile.publish.description.to_string(),
+            made_for_kids: profile.publish.made_for_kids,
         });
         configs.insert(uploader::Channel::Tiktok, uploader::ChannelConfig::Tiktok {
             privacy_level: "PUBLIC".into(),

@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::AppState;
 use crate::models;
+use crate::entities;
 
 
 #[derive(Debug, Clone, Display, EnumString, Serialize, Deserialize, Eq, PartialEq, Hash, sqlx::Type)]
@@ -36,6 +37,21 @@ pub enum AgentError {
 
     #[error("Decode error: {0}")]
     Decode(String),
+}
+
+/// The profile of the workflow this job belongs to.
+pub async fn job_profile(
+    state: &Arc<AppState>,
+    job: &models::Job,
+) -> Result<&'static entities::StudioProfile, AgentError> {
+    let id = state.services.db
+        .get_workflow_profile(&job.workflow_id)
+        .await
+        .map_err(|e| AgentError::Execute(e.to_string()))?
+        .ok_or_else(|| AgentError::Execute(format!("Workflow {} not found", job.workflow_id)))?;
+
+    entities::profile_by_id(&id)
+        .ok_or_else(|| AgentError::Execute(format!("Workflow {} uses unknown profile '{}'", job.workflow_id, id)))
 }
 
 #[async_trait]

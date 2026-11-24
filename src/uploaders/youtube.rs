@@ -58,6 +58,7 @@ impl YoutubeUploader {
                 category_id,
                 description,
                 tags,
+                made_for_kids,
             } => serde_json::json!({
                 "snippet": {
                     "title": title,
@@ -67,8 +68,8 @@ impl YoutubeUploader {
                 },
                 "status": {
                     "privacyStatus": "public",
-                    "madeForKids": true,
-                    "selfDeclaredMadeForKids": true
+                    "madeForKids": made_for_kids,
+                    "selfDeclaredMadeForKids": made_for_kids
                 }
             }),
             _ => return Err("Youtube config incorrect".to_string()),

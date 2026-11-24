@@ -1,0 +1,29 @@
+# Quốc Khánh: cast of the kids_edu profile.
+# One file per character. Only `name` is required; see data/characters/README.md.
+
+enabled = true
+spotlight = true
+
+name = "Quốc Khánh"
+nickname = "Bin"
+birth_year = 2020
+
+role = "Protagonist"
+family_role = "child"
+story_function = "Main protagonist who initiates most adventures and learning experiences."
+
+profession = "Student"
+topic_domain = "Curiosity, Exploration, Everyday Learning"
+
+catchphrase = "I want to try it!"
+speaking_style = "Very energetic, speaks quickly, asks many 'why' questions, expresses excitement openly."
+visual_template = "A 3D Pixar style illustration of a cute Vietnamese boy, age {age}, short black hair, bright curious eyes, wearing a black sports cap with white trim on the brim and the word 'Hello!' written in white text with a small smile icon underneath. He is wearing a black sleeveless athletic tank top with white stripes on the shoulders, matching black sports shorts with white stripes down the sides and a pair of red and grey athletic slide sandals with three bold white stripes across the red straps. All features, eyeglasses, and clothing details are clear and detailed"
+
+strengths = "Curious, brave, friendly, imaginative, willing to help others."
+weaknesses = "Impulsive, impatient, easily distracted, sometimes acts before thinking."
+core_values = "Curiosity, friendship, courage, kindness."
+
+relationship_prompt = "Bin is the son of Nam and Diem Suong. He is the best friend of Hoang Yen. Hoang Yen often helps and protects him when he gets into trouble."
+personality_prompt = "A lively and energetic Vietnamese boy who loves exploring everything around him and learning through adventure."
+
+# voice_id = "..."   # TTS voice for this character; omit to use the default voice

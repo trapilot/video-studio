@@ -36,6 +36,8 @@ pub enum ChannelConfig {
         category_id: String,
         description: String,
         tags: Vec<String>,
+        /// COPPA "made for kids" flag, from the workflow's profile.
+        made_for_kids: bool,
     },
     Tiktok {
         privacy_level: String,

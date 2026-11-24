@@ -1,23 +1,15 @@
 use serde::Deserialize;
 
+/// Studio-wide technical settings. What to produce (format, audience, language,
+/// publish metadata) lives in the per-video-type profiles (`entities/profile.rs`).
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub movie: MovieConfig,
     pub voice: VoiceConfig,
     pub tts: TtsConfig,
     pub diffusion: DiffusionParams,
     pub feature: FeatureConfig,
     pub workflow_per_day: i64,
     // pub workflow_gap_minutes: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MovieConfig {
-    pub language: String,
-    pub country: String,
-    pub default_description: String,
-    pub default_tags: Vec<String>,
-    pub youtube_category: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,19 +42,6 @@ pub fn build_config() -> Config {
     Config {
         workflow_per_day: 3,
         // workflow_gap_minutes: 15,
-        movie: MovieConfig {
-            language: "English".to_string(),
-            country: "Vietnam".to_string(),
-            default_description: "An AI-generated educational short movie".to_string(),
-            default_tags: vec![
-                "ai movie".to_string(),
-                "english".to_string(),
-                "vietnamese".to_string(),
-                "education".to_string(),
-                "children".to_string(),
-            ],
-            youtube_category: "27".to_string(),
-        },
         voice: VoiceConfig {
             base_voice: "pNInz6obpgDQGcFmaJgB".to_string(),
             default_gender: "female".to_string(),

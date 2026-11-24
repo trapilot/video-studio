@@ -1,6 +1,6 @@
 CREATE TABLE `workflows` (
     `id` TEXT PRIMARY KEY,
-    `age` INTEGER NOT NULL,
+    `profile` TEXT NOT NULL,
     `task` TEXT NOT NULL,
     `topic` TEXT,
     `status` TEXT NOT NULL,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS `oauth_tokens` (
 );
 
 
-CREATE INDEX `idx_workflow_age_status` ON `workflows`(`age`, `status`);
+CREATE INDEX `idx_workflow_profile_created` ON `workflows`(`profile`, `created_at`);
 
 CREATE INDEX `idx_jobs_agent_status` ON `jobs`(`agent`, `status`);
 

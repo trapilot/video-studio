@@ -1,200 +1,298 @@
+//! Characters are data, not code: one TOML file per character under
+//! `{data_dir}/characters/{profile_id}/`. They are loaded once at startup.
+//!
+//! To add a character, drop a new `.toml` file into the profile's folder and
+//! restart. No rebuild needed. Files load in file-name order, so a numeric
+//! prefix (`01_bin.toml`) controls the order the cast is listed in prompts.
+//! See `data/characters/README.md` for the field reference.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use chrono::{Datelike, Utc};
+use serde::Deserialize;
 
+use super::profile::{PROFILES, NARRATOR};
+
+/// Default data folder, overridable with `STUDIO_DATA_DIR`.
+pub const DEFAULT_DATA_DIR: &str = "./data";
+
+/// A recurring on-screen character. Only `name` is required in the file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Character {
+    /// `false` retires the character without deleting the file.
+    #[serde(default = "yes")]
     pub enabled: bool,
+    /// `true` = can be chosen as the main character.
+    #[serde(default)]
     pub spotlight: bool,
 
-    pub fullname: &'static str,
-    pub nickname: &'static str,
-    pub voice_id: Option<&'static str>,
-    pub birth_year: u16,
+    /// Unique within the profile. The LLM uses it (or `nickname`) as the actor/speaker name.
+    pub name: String,
+    #[serde(default)]
+    pub nickname: String,
+    /// TTS voice for this character. Empty = the default voice.
+    #[serde(default)]
+    pub voice_id: String,
+    /// Used to compute the age shown to the LLM and `{age}` in `visual_template`.
+    #[serde(default)]
+    pub birth_year: Option<i32>,
 
-    pub role: &'static str,
-    pub family_role: &'static str,
-    pub story_function: &'static str,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub family_role: String,
+    #[serde(default)]
+    pub story_function: String,
 
-    pub profession: &'static str,
-    pub topic_domain: &'static str,
+    #[serde(default)]
+    pub profession: String,
+    #[serde(default)]
+    pub topic_domain: String,
 
-    pub catchphrase: &'static str,
-    pub speaking_style: &'static str,
-    pub visual_template: &'static str,
+    #[serde(default)]
+    pub catchphrase: String,
+    #[serde(default)]
+    pub speaking_style: String,
+    /// What the character looks like, for image prompts. `{age}` is replaced with the current age.
+    #[serde(default)]
+    pub visual_template: String,
 
-    pub strengths: &'static str,
-    pub weaknesses: &'static str,
-    pub core_values: &'static str,
+    #[serde(default)]
+    pub strengths: String,
+    #[serde(default)]
+    pub weaknesses: String,
+    #[serde(default)]
+    pub core_values: String,
 
-    pub relationship_prompt: &'static str,
-    pub personality_prompt: &'static str,
+    /// How this character relates to the others. Read by the LLM.
+    #[serde(default)]
+    pub relationship_prompt: String,
+    /// Who this character is. Read by the LLM.
+    #[serde(default)]
+    pub personality_prompt: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Character {
-    pub fn age(&self) -> i32 {
-        let current_year = Utc::now().year();
-        current_year - self.birth_year as i32
+    pub fn age(&self) -> Option<i32> {
+        self.birth_year.map(|y| Utc::now().year() - y)
     }
 
-    pub fn name(&self, language: &str) -> &str {
-        if language == "English" {
-            // return self.nickname;
-        }
-        self.fullname
+    /// Age for prompts: a number, or "unspecified" when `birth_year` is omitted.
+    pub fn age_label(&self) -> String {
+        self.age()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unspecified".to_string())
     }
-    
+
+    /// `visual_template` with `{age}` filled in.
     pub fn visual_anchor(&self) -> String {
-        self.visual_template.replace("{age}", &self.age().to_string())
+        self.visual_template.replace("{age}", &self.age_label())
     }
 
-    pub fn find_char(name: &str) -> Option<&'static Character> {
-        EDU_CHARACTERS
-            .iter()
-            .find(|c| c.fullname == name || c.nickname == name)
+    /// True if `name` refers to this character by full name or nickname.
+    pub fn answers_to(&self, name: &str) -> bool {
+        let name = name.trim();
+        self.name == name || (!self.nickname.is_empty() && self.nickname == name)
     }
 
-    pub fn find_chars(characters: &Vec<String>) -> Vec<&'static Character> {
-        let character_set: std::collections::HashSet<&str> = characters
-            .iter()
-            .map(|s| s.as_str())
-            .collect();
-
-        EDU_CHARACTERS
-            .iter()
-            .filter(|c| {
-                return character_set.contains(c.fullname) || character_set.contains(c.nickname)
-            })
-            .collect()
+    pub fn voice(&self) -> Option<&str> {
+        let v = self.voice_id.trim();
+        (!v.is_empty()).then_some(v)
     }
 
-    pub fn main_char() -> &'static Character {
-        EDU_CHARACTERS.first().unwrap()
-    }
-
-    pub fn spotlight_chars() -> Vec<&'static Character> {
-        return EDU_CHARACTERS
+    /// Prompt block with every non-empty field, so whatever is written in the
+    /// file actually reaches the LLM.
+    pub fn describe(&self) -> String {
+        let age = self.age_label();
+        let anchor = self.visual_anchor();
+        let fields = [
+            ("Nickname", self.nickname.as_str()),
+            ("Age", age.as_str()),
+            ("Role", self.role.as_str()),
+            ("Family role", self.family_role.as_str()),
+            ("Story function", self.story_function.as_str()),
+            ("Profession", self.profession.as_str()),
+            ("Personality", self.personality_prompt.as_str()),
+            ("Speaking style", self.speaking_style.as_str()),
+            ("Catchphrase", self.catchphrase.as_str()),
+            ("Strengths", self.strengths.as_str()),
+            ("Weaknesses", self.weaknesses.as_str()),
+            ("Core values", self.core_values.as_str()),
+            ("Relations", self.relationship_prompt.as_str()),
+            ("Appearance", anchor.as_str()),
+        ];
+        let body = fields
             .iter()
-            .filter(|c| c.enabled && c.spotlight)
-            .collect();
-    }
-
-    pub fn relation_chars() -> Vec<&'static Character> {
-        return EDU_CHARACTERS
-            .iter()
-            .filter(|c| c.enabled && !c.spotlight)
-            .collect();
+            .filter(|(_, v)| !v.trim().is_empty())
+            .map(|(k, v)| format!("  {}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("- {}\n{}", self.name, body)
     }
 }
 
-pub const EDU_CHARACTERS: &[Character] = &[
-    Character {
-        enabled: true,
-        spotlight: true,
+static CASTS: OnceLock<HashMap<String, Vec<Character>>> = OnceLock::new();
 
-        fullname: "Quốc Khánh",
-        nickname: "Bin",
-        voice_id: None,
-        birth_year: 2020,
+/// Load every profile's cast from `{data_dir}/characters`. Call once at startup.
+/// A missing `characters` folder is fine (all profiles narrator-only); a bad file is an error.
+pub fn init(data_dir: &str) -> Result<(), String> {
+    let casts = load_all(Path::new(data_dir))?;
+    CASTS.set(casts).map_err(|_| "Characters already loaded".to_string())
+}
 
-        role: "Protagonist",
-        family_role: "child",
-        story_function: "Main protagonist who initiates most adventures and learning experiences.",
+/// The loaded cast of a profile, in file-name order. Empty if it has none.
+pub fn cast_for(profile_id: &str) -> &'static [Character] {
+    CASTS
+        .get()
+        .and_then(|c| c.get(profile_id))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
 
-        profession: "Student",
-        topic_domain: "Curiosity, Exploration, Everyday Learning",
+fn load_all(data_dir: &Path) -> Result<HashMap<String, Vec<Character>>, String> {
+    let root = data_dir.join("characters");
+    let mut casts = HashMap::new();
 
-        catchphrase: "I want to try it!",
-        speaking_style: "Very energetic, speaks quickly, asks many 'why' questions, expresses excitement openly.",
-        visual_template: "A 3D Pixar style illustration of a cute Vietnamese boy, age {age}, short black hair, bright curious eyes, wearing a black sports cap with white trim on the brim and the word 'Hello!' written in white text with a small smile icon underneath. He is wearing a black sleeveless athletic tank top with white stripes on the shoulders, matching black sports shorts with white stripes down the sides and a pair of red and grey athletic slide sandals with three bold white stripes across the red straps. All features, eyeglasses, and clothing details are clear and detailed",
+    if !root.is_dir() {
+        return Ok(casts);
+    }
 
-        strengths: "Curious, brave, friendly, imaginative, willing to help others.",
-        weaknesses: "Impulsive, impatient, easily distracted, sometimes acts before thinking.",
-        core_values: "Curiosity, friendship, courage, kindness.",
+    for entry in read_sorted(&root)? {
+        if !entry.is_dir() {
+            continue;
+        }
+        let profile_id = entry.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        // A folder that matches no profile is almost always a typo; fail loudly.
+        if !PROFILES.iter().any(|p| p.id == profile_id) {
+            let known = PROFILES.iter().map(|p| p.id).collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "{}: folder doesn't match any profile id (known: {})",
+                entry.display(), known
+            ));
+        }
+        casts.insert(profile_id, load_cast(&entry)?);
+    }
 
-        relationship_prompt: "Bin is the son of Nam and Diem Suong. He is the best friend of Hoang Yen. Hoang Yen often helps and protects him when he gets into trouble.",
-        personality_prompt: "A lively and energetic Vietnamese boy who loves exploring everything around him and learning through adventure.",
-    },
+    Ok(casts)
+}
 
-    Character {
-        enabled: true,
-        spotlight: false,
+fn load_cast(dir: &Path) -> Result<Vec<Character>, String> {
+    let mut cast: Vec<Character> = Vec::new();
 
-        fullname: "Hoàng Yến",
-        nickname: "Hoàng Yến",
-        voice_id: None,
-        birth_year: 2020,
+    for path in read_sorted(dir)? {
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        let mut character: Character = toml::from_str(&text)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        character.name = character.name.trim().to_string();
+        character.nickname = character.nickname.trim().to_string();
 
-        role: "Best Friend",
-        family_role: "friend",
-        story_function: "Voice of reason and emotional support for Bin.",
+        if character.name.is_empty() {
+            return Err(format!("{}: `name` is empty", path.display()));
+        }
+        if character.answers_to(NARRATOR) {
+            return Err(format!("{}: \"{}\" is reserved for narration", path.display(), NARRATOR));
+        }
+        // Names and nicknames must all be distinct, or "who is speaking" becomes ambiguous.
+        if let Some(other) = cast.iter().find(|c| {
+            c.answers_to(&character.name) || (!character.nickname.is_empty() && c.answers_to(&character.nickname))
+        }) {
+            return Err(format!(
+                "{}: name/nickname of \"{}\" clashes with \"{}\"",
+                path.display(), character.name, other.name
+            ));
+        }
+        cast.push(character);
+    }
 
-        profession: "Student",
-        topic_domain: "Learning, Friendship, Kindness",
+    if cast.iter().any(|c| c.enabled) && !cast.iter().any(|c| c.enabled && c.spotlight) {
+        return Err(format!(
+            "{}: cast has no enabled character with `spotlight = true` (needed for the main character)",
+            dir.display()
+        ));
+    }
 
-        catchphrase: "Để mình giúp nhé!",
-        speaking_style: "Gentle, polite, calm, encouraging and supportive.",
-        visual_template: "a 3D Pixar style illustration of a cute Vietnamese girl age {age}, long black hair with pink ribbons, pink dress, holding books, warm smile, white background",
-        
-        strengths: "Intelligent, hardworking, loyal, responsible, brave when protecting friends.",
-        weaknesses: "Can worry too much, dislikes conflict, sometimes overthinks.",
-        core_values: "Kindness, friendship, honesty, responsibility.",
-        
-        relationship_prompt: "Hoang Yen is Bin's classmate and best friend. She often helps him solve problems and stands up for him when needed.",
-        personality_prompt: "A sweet and intelligent girl who loves learning and always supports her friends.",
-    },
+    Ok(cast)
+}
 
-    Character {
-        enabled: true,
-        spotlight: false,
+fn read_sorted(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = std::fs::read_dir(dir)
+        .map_err(|e| format!("{}: {}", dir.display(), e))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
 
-        fullname: "Nam",
-        nickname: "Nam",
-        voice_id: None,
-        birth_year: 1990,
+#[cfg(test)]
+pub(crate) fn init_for_tests() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/data");
+    if CASTS.get().is_none() {
+        let _ = CASTS.set(load_all(Path::new(dir)).expect("data/characters must load"));
+    }
+}
 
-        role: "Father",
-        family_role: "father",
-        story_function: "Mentor figure who explains concepts and guides Bin's learning.",
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        profession: "Software Engineer",
-        topic_domain: "Technology, Logic, Problem Solving",
+    #[test]
+    fn repo_data_loads() {
+        init_for_tests();
+        let kids = cast_for("kids_edu");
+        assert_eq!(kids.len(), 4);
+        assert!(kids[0].answers_to("Bin") && kids[0].answers_to("Quốc Khánh"));
+        assert!(kids[0].spotlight);
+        assert!(!kids[0].visual_anchor().contains("{age}"));
+        assert!(cast_for("explainer").is_empty());
+    }
 
-        catchphrase: "What do you think about this?",
-        speaking_style: "Calm, logical, patient, explains things step by step.",
-        visual_template: "A 3D Pixar-style character illustration of the Vietnamese father, with his precise facial features, welcoming smile, and thin metal-framed spectacles preserved. He is {age} years old and is wearing a well-fitted black crew-neck t-shirt and classic blue denim jeans, with simple dark sneakers. His pose is friendly and forward-facing, set against a clean, subtly graded light grey studio background. The character model is entire and well-lit with soft, warm studio lighting, perfect for a high-quality character render. All features, eyeglasses, and clothing details are clear and detailed",
+    fn write(dir: &Path, name: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), body).unwrap();
+    }
 
-        strengths: "Wise, patient, analytical, dependable.",
-        weaknesses: "Perfectionist, strict with rules, sometimes too serious.",
-        core_values: "Responsibility, honesty, critical thinking, discipline.",
+    #[test]
+    fn minimal_file_only_needs_a_name() {
+        let root = std::env::temp_dir().join(format!("vs_chars_{}", uuid::Uuid::new_v4()));
+        write(&root.join("characters/kids_edu"), "a.toml", "name = \"Mia\"\nspotlight = true\n");
+        let casts = load_all(&root).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
 
-        relationship_prompt: "Nam is Bin's father and Diem Suong's husband. Bin often asks him questions about the world.",
-        personality_prompt: "A thoughtful software engineer who enjoys teaching children how things work.",
-    },
+        let mia = &casts["kids_edu"][0];
+        assert!(mia.enabled);
+        assert_eq!(mia.age_label(), "unspecified");
+        assert_eq!(mia.voice(), None);
+    }
 
-    Character {
-        enabled: true,
-        spotlight: false,
-
-        fullname: "Diễm Sương",
-        nickname: "Suong",
-        voice_id: None,
-        birth_year: 1993,
-
-        role: "Mother",
-        family_role: "mother",
-        story_function: "Emotional anchor of the family and teacher of life lessons.",
-
-        profession: "Elementary School Teacher",
-        topic_domain: "Education, Family, Life Skills",
-
-        catchphrase: "Listen to me!",
-        speaking_style: "Warm, caring, nurturing, occasionally firm when teaching lessons.",
-        visual_template: "A 3D Pixar-style character illustration of the Vietnamese mother, with her precise facial features and warm smile preserved. She is {age} years old, wearing her original white sleeveless top and wide-leg white pants, with a pair of metal-framed sunglasses tucked into the neckline. Her pose is friendly and forward-facing, set against a clean, subtly graded light grey studio background. The character model is entire and well-lit with soft, warm studio lighting, perfect for a high-quality character render. All features and clothing details are clear and detailed",
-
-        strengths: "Patient, loving, organized, empathetic.",
-        weaknesses: "Can become worried easily, sometimes overprotective.",
-        core_values: "Family, respect, kindness, good habits.",
-        
-        relationship_prompt: "Diem Suong is Bin's mother and Nam's wife. She helps Bin learn responsibility and good behavior.",
-        personality_prompt: "A caring elementary school teacher who loves her family and wants children to grow into kind people.",
-    },
-];
+    #[test]
+    fn rejects_bad_data() {
+        let cases: &[(&str, &[(&str, &str)])] = &[
+            ("unknown_profile", &[("a.toml", "name = \"A\"\nspotlight = true")]),
+            ("kids_edu", &[("a.toml", "name = \"A\"\nspotlight = true"), ("b.toml", "name = \"A\"")]),
+            ("kids_edu", &[("a.toml", "name = \"A\"\nspotlight = true"), ("b.toml", "name = \"B\"\nnickname = \"A\"")]),
+            ("kids_edu", &[("a.toml", "name = \"Narrator\"\nspotlight = true")]),
+            ("kids_edu", &[("a.toml", "name = \"A\"")]),                       // no spotlight
+            ("kids_edu", &[("a.toml", "name = \"A\"\nspotlite = true")]),      // typo'd field
+        ];
+        for (folder, files) in cases {
+            let root = std::env::temp_dir().join(format!("vs_chars_{}", uuid::Uuid::new_v4()));
+            for (name, body) in *files {
+                write(&root.join("characters").join(folder), name, body);
+            }
+            let result = load_all(&root);
+            let _ = std::fs::remove_dir_all(&root);
+            assert!(result.is_err(), "expected error for {:?}", files);
+        }
+    }
+}

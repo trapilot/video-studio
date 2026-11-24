@@ -290,7 +290,7 @@ impl DbManager {
 
     pub async fn create_workflow(
         &self,
-        age: i32,
+        profile: &str,
         task: String,
     ) -> Result<String, sqlx::Error> {
 
@@ -302,7 +302,7 @@ impl DbManager {
             r#"
             INSERT INTO workflows (
                 id,
-                age,
+                profile,
                 task,
                 status,
                 threshold_at,
@@ -313,7 +313,7 @@ impl DbManager {
             "#,
         )
         .bind(&workflow_id)
-        .bind(age)
+        .bind(profile)
         .bind(task)
         .bind(WorkflowStatus::Running.to_string())
         .bind(next_24h)
@@ -364,26 +364,36 @@ impl DbManager {
         Ok(workflow)
     }
 
-    pub async fn get_recent_topics(&self, age: i32, days: u8) -> Result<Vec<String>, sqlx::Error> {
+    /// Topics of this profile's workflows from the last `days` days, newest first.
+    pub async fn get_recent_topics(&self, profile: &str, days: u8, limit: u32) -> Result<Vec<String>, sqlx::Error> {
         let since = self.start_of_recent_ts(days);
         let topics = sqlx::query_scalar::<_, String>(
             r#"
             SELECT topic
             FROM workflows
-            WHERE age = ? AND created_at >= ? AND status != ?
-            ORDER BY id DESC
+            WHERE profile = ? AND created_at >= ? AND status != ? AND topic IS NOT NULL
+            ORDER BY created_at DESC
             LIMIT ?
             "#
         )
-        .bind(age)
+        .bind(profile)
         .bind(since)
         .bind(WorkflowStatus::Failed.to_string())
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(topics)
     }
     
+    /// Profile id a workflow was created with.
+    pub async fn get_workflow_profile(&self, workflow_id: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>("SELECT profile FROM workflows WHERE id = ?")
+            .bind(workflow_id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
     pub async fn agent_is_busy(
         &self,
         agent: agent::AgentType,

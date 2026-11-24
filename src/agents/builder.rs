@@ -63,8 +63,11 @@ impl Agent for BuilderAgent {
             serde_json::from_str(&job.payload)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
+        let profile = job_profile(state, job).await?;
+
         let timeline: Timeline = self.execute(
                 &state,
+                profile,
                 &storyboard,
                 job.workflow_path(),
             )
@@ -87,6 +90,7 @@ impl BuilderAgent {
     async fn execute(
         &self,
         state: &Arc<AppState>,
+        profile: &'static StudioProfile,
         storyboard: &Storyboard,
         target_path: String
     ) -> Result<Timeline, String> {
@@ -109,8 +113,7 @@ impl BuilderAgent {
                     
                     if !exists_image {
                         let _ = text_to_image(
-                            shot.visual_prompt(),
-                            // shot.visual_prompt.clone(),
+                            shot.image_prompt(profile),
                             assets.clone(),
                             config.clone(),
                             providers.clone()

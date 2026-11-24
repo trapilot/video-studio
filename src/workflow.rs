@@ -6,7 +6,6 @@ use crate::AppState;
 use crate::agent;
 use crate::agents;
 use crate::models;
-use crate::entities;
 
 
 struct AgentEntry {
@@ -122,7 +121,6 @@ impl WorkflowEngine {
             loop {
                 let db = &state.services.db;
                 let workflow_per_day = state.config.workflow_per_day;
-                let main_char = entities::Character::main_char();
 
                 let planner_busy =
                     db.agent_is_busy(agent::AgentType::Planner)
@@ -134,7 +132,7 @@ impl WorkflowEngine {
                     .unwrap_or(0);
 
                 if !planner_busy && today_count < workflow_per_day {
-                    match db.create_workflow(main_char.age(), "Create AI video".to_string()).await {
+                    match db.create_workflow(state.profile.id, format!("Create {}", state.profile.format)).await {
                         Ok(workflow_id) => {
 
                             let job = db.create_job(

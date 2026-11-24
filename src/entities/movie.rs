@@ -198,37 +198,83 @@ pub struct Environment {
     pub weather: String,
 }
 
+/// Cloudflare flux-1-schnell rejects prompts over 2048 characters.
+pub const MAX_IMAGE_PROMPT_CHARS: usize = 2000;
+
 impl Shot {
-    pub fn visual_prompt(&self) -> String {
-        let actors = if self.actors.is_empty() {
-            "no characters".to_string()
-        } else {
-            self.actors
-                .iter()
-                .map(|a| a.character.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+    /// Full image prompt: the profile's art style, the Writer's description of
+    /// the shot, each actor's look from their character file, the setting and
+    /// the camera. Every shot shares the style and character looks, so the
+    /// images stay consistent.
+    pub fn image_prompt(&self, profile: &super::StudioProfile) -> String {
+        let actors = self.actors
+            .iter()
+            .map(|a| {
+                let look = profile
+                    .character(&a.character)
+                    .map(|c| c.visual_anchor())
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| format!(" ({})", l))
+                    .unwrap_or_default();
+                format!("{}{}, {}, {}, {} of frame", a.character, look, a.action, a.emotion, a.position)
+            })
+            .collect::<Vec<_>>();
 
-        let environment = format!(
-            "{} at {}, {} weather",
-            self.environment.location,
-            self.environment.time_of_day,
-            self.environment.weather
-        );
+        let mut parts = vec![
+            profile.visual_style.to_string(),
+            self.visual_prompt.trim().to_string(),
+        ];
+        if !actors.is_empty() {
+            parts.push(format!("Characters: {}", actors.join("; ")));
+        }
+        parts.push(format!(
+            "Setting: {}, {}, {} weather",
+            self.environment.location, self.environment.time_of_day, self.environment.weather
+        ));
+        parts.push(format!("Camera: {} shot, {} angle", self.camera.shot_type, self.camera.angle));
+        parts.push("vertical 9:16 composition, subject centered, no text, no captions, no logos".to_string());
 
-        let camera = format!(
-            "{} shot, {} angle, {} movement",
-            self.camera.shot_type,
-            self.camera.angle,
-            self.camera.movement
-        );
+        let prompt = parts
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(". ");
+        prompt.chars().take(MAX_IMAGE_PROMPT_CHARS).collect()
+    }
+}
 
-        format!(
-            "{env}, actors: {actors}, camera: {camera}, cinematic lighting, ultra detailed, 9:16 vertical, realistic",
-            env = environment,
-            actors = actors,
-            camera = camera
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::profile_by_id;
+
+    fn shot(actors: Vec<Actor>) -> Shot {
+        Shot {
+            shot_id: 1,
+            visual_prompt: "Bin looks up at the night sky".into(),
+            motion: Motion::ZoomIn,
+            transition: Transition::Fade,
+            actors,
+            dialogues: vec![Dialogue { character: "Bin".into(), text: "Wow!".into() }],
+            environment: Environment { location: "backyard".into(), time_of_day: "night".into(), weather: "clear".into() },
+            camera: Camera { shot_type: "wide".into(), angle: "low".into(), movement: "static".into() },
+        }
+    }
+
+    #[test]
+    fn image_prompt_uses_style_shot_and_character_look() {
+        crate::entities::character::init_for_tests();
+        let kids = profile_by_id("kids_edu").unwrap();
+        let bin = &kids.cast()[0];
+
+        let p = shot(vec![Actor { character: "Bin".into(), action: "pointing".into(), emotion: "amazed".into(), position: Position::Center }])
+            .image_prompt(kids);
+
+        assert!(p.starts_with(kids.visual_style));
+        assert!(p.contains("Bin looks up at the night sky"));
+        assert!(p.contains(&bin.visual_anchor()[..40]), "actor look from the character file");
+        assert!(p.contains("backyard"));
+        assert!(!p.contains("{age}"));
+        assert!(p.chars().count() <= MAX_IMAGE_PROMPT_CHARS);
     }
 }
