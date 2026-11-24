@@ -399,7 +399,20 @@ impl ProviderManager {
         if let Some(mutex) = runtime_mutex {
             let mut runtime = mutex.lock().await;
 
+            // Only free the slot. The circuit is reset by `record_success`, so
+            // failures accumulate across calls and can actually open it.
             runtime.state.running = runtime.state.running.saturating_sub(1);
+        }
+    }
+
+    async fn record_success(&self, provider: &Provider) {
+        let runtime_mutex = {
+            let map = self.inner.read().await;
+            map.get(provider).cloned()
+        };
+
+        if let Some(mutex) = runtime_mutex {
+            let mut runtime = mutex.lock().await;
             runtime.state.circuit.failure_count = 0;
             runtime.state.circuit.is_open = false;
         }
@@ -624,6 +637,7 @@ impl ProviderGuard {
 
             match self.client.call(&req, &credential).await {
                 Ok(v) => {
+                    self.manager.record_success(&self.provider).await;
                     return Ok(v)
                 },
                 Err(ProviderError::RequestExceeded { retry_after, .. }) => {
@@ -661,5 +675,47 @@ impl ProviderResponse {
             ProviderResponse::Bytes(b) => Ok(b),
             ProviderResponse::Text(_) => Err(ProviderError::UnexpectedResponse),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct AlwaysFails;
+
+    #[async_trait::async_trait]
+    impl ProviderClient for AlwaysFails {
+        fn provider(&self) -> Provider { Provider::Gemini }
+        fn config(&self) -> ProviderConfig {
+            ProviderConfig { daily_limit: None, retry_after: 5, reset_daily: false, reset_monthly: false, reset_time: None }
+        }
+        async fn call(&self, _: &ProviderRequest, _: &ApiCredential) -> Result<ProviderResponse, ProviderError> {
+            Err(ProviderError::Http { provider: "test".into(), status: 500, body: "boom".into() })
+        }
+        fn is_auth_error(&self, _: u16, _: &str) -> bool { false }
+        fn is_quota_error(&self, _: u16, _: &str) -> bool { false }
+    }
+
+    fn req() -> ProviderRequest {
+        ProviderRequest::Script(ScriptRequest {
+            system: String::new(), prompt: String::new(), temperature: None, max_tokens: None, json_mode: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn circuit_opens_after_repeated_failures() {
+        let manager = ProviderManager::new();
+        manager.register_with_keys(Arc::new(AlwaysFails), 10, "VIDEO_STUDIO_TEST_UNSET").await;
+        manager.add_key(&Provider::Gemini, &AlwaysFails.config(), ApiCredential { api_key: "k".into(), account_id: None }).await;
+
+        for _ in 0..5 {
+            let guard = manager.acquire(&Provider::Gemini).await.expect("closed circuit hands out the key");
+            assert!(guard.call(req()).await.is_err());
+            // Let the guard's Drop (which spawns `release`) run.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert!(manager.acquire(&Provider::Gemini).await.is_none(), "circuit should be open after 5 failures");
     }
 }

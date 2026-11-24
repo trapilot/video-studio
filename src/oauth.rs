@@ -11,10 +11,18 @@ struct DbError(String);
 
 impl warp::reject::Reject for DbError {}
 
+/// True once YouTube authorization has completed (a refresh token is stored).
+/// A `youtube` row alone is not enough: it is saved before the user authorizes,
+/// so an interrupted first run must start the OAuth flow again.
 pub async fn has_auth_token(db: &Arc<DbManager>) -> bool {
-    // tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    matches!(
+        db.get_oauth_token("youtube").await,
+        Ok(Some(token)) if is_authorized(&token)
+    )
+}
 
-    get_youtube_token(&db).await.is_ok()
+fn is_authorized(token: &OAuthToken) -> bool {
+    token.refresh_token.as_deref().is_some_and(|t| !t.trim().is_empty())
 }
 
 pub async fn start_oauth_server(db: &Arc<DbManager>) {
@@ -206,6 +214,15 @@ pub async fn get_youtube_token(
         .map_err(|e| e.to_string())?
         .ok_or("Youtube token not found")?;
 
+    if !is_authorized(&token) {
+        return Err("YouTube is not authorized yet: restart the studio and complete the browser login".to_string());
+    }
+
+    // Refresh when expired, about to expire, or when no access token is stored.
+    if token.access_token.is_none() || token.expires_at.is_none() {
+        return refresh_youtube_token(db, token).await;
+    }
+
     if let Some(expires) = token.expires_at {
         let now = chrono::Utc::now().timestamp();
 
@@ -303,4 +320,37 @@ pub async fn refresh_youtube_token(
 
     Ok(saved)
     
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn half_finished_login_is_not_authorized() {
+        let path = std::env::temp_dir().join(format!("video_studio_oauth_{}.db", uuid::Uuid::new_v4()));
+        let db = Arc::new(DbManager::new(path.to_str().unwrap()).await.unwrap());
+        let token = |refresh: Option<&str>| OAuthToken {
+            provider: "youtube".into(),
+            client_id: "id".into(),
+            client_secret: "secret".into(),
+            access_token: None,
+            refresh_token: refresh.map(String::from),
+            auth_code: None,
+            expires_at: None,
+            updated_at: 0,
+        };
+
+        assert!(!has_auth_token(&db).await, "no row");
+
+        // What the first run saves before the browser login completes.
+        db.save_oauth_token(&token(None)).await.unwrap();
+        assert!(!has_auth_token(&db).await, "row without refresh token");
+        assert!(get_youtube_token(&db).await.unwrap_err().contains("not authorized"));
+
+        db.save_oauth_token(&token(Some("refresh"))).await.unwrap();
+        assert!(has_auth_token(&db).await);
+
+        db.pool.close().await;
+        let _ = std::fs::remove_file(&path);
+    }
 }
