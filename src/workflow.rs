@@ -6,6 +6,7 @@ use std::str::FromStr;
 use crate::config::CONFIG;
 use crate::enums::*;
 use crate::models::*;
+use crate::characters::Character;
 use crate::profiles::NARRATOR;
 use crate::renderer::*;
 use crate::helper::*;
@@ -75,28 +76,28 @@ pub async fn run_agent_workflow(
                     );
 
                     let cast_section = if profile.has_cast() {
-                        let spotlight_chars = profile.characters
+                        let spotlight_chars = profile.cast()
                             .iter()
                             .filter(|c| c.enabled && c.spotlight)
                             .map(|c| format!(
                                 "- {} ({})\n  Age: {}\n  Personality: {}\n  Relations: {}",
                                 c.name,
                                 c.topic_domain,
-                                now_age(c.birth_year),
+                                c.age_label(),
                                 c.personality_prompt,
                                 c.relationship_prompt
                             ))
                             .collect::<Vec<_>>()
                             .join("\n");
 
-                        let relation_chars = profile.characters
+                        let relation_chars = profile.cast()
                             .iter()
                             .filter(|c| c.enabled && !c.spotlight)
                             .map(|c| format!(
                                 "- {} ({})\n  Age: {}\n  Role: {}\n  Relations: {}",
                                 c.name,
                                 c.profession,
-                                now_age(c.birth_year),
+                                c.age_label(),
                                 c.role,
                                 c.relationship_prompt
                             ))
@@ -171,10 +172,10 @@ pub async fn run_agent_workflow(
                             .character(&state.main_character)
                             .ok_or_else(|| ctx("Writer", format!("Unknown main character: {}", state.main_character)))?;
 
-                        let spotlight_chars = describe_characters(profile.characters, &state.spotlight_characters);
-                        let supporting_chars = describe_characters(profile.characters, &state.supporting_characters);
+                        let spotlight_chars = describe_characters(profile.cast(), &state.spotlight_characters);
+                        let supporting_chars = describe_characters(profile.cast(), &state.supporting_characters);
 
-                        let all_chars = profile.characters
+                        let all_chars = profile.cast()
                             .iter()
                             .filter(|c| c.enabled)
                             .map(|c| format!("- {}: {}", c.name, c.personality_prompt))
@@ -198,7 +199,13 @@ pub async fn run_agent_workflow(
                             state.supporting_characters.join(", "),
                             all_chars,
                         );
-                        (main_char.visual_anchor, cast_block, cast_rules, user_cast)
+                        // Fall back to the profile style if the character has no anchor.
+                        let anchor = if main_char.visual_anchor.trim().is_empty() {
+                            profile.visual_style
+                        } else {
+                            main_char.visual_anchor.as_str()
+                        };
+                        (anchor, cast_block, cast_rules, user_cast)
                     } else {
                         let cast_block = format!(
                             "VOICE:\nThere is no cast. Every voice_segment must use \"speaker\": \"{}\", speaking directly to the viewer.",
@@ -334,7 +341,7 @@ pub async fn run_agent_workflow(
                             segment.voice_id = Some(
                                 profile
                                     .character(&segment.speaker)
-                                    .map(|c| c.voice_id.to_string())
+                                    .map(|c| c.voice().to_string())
                                     .unwrap_or(CONFIG.voice.base_voice.to_string())
                             );
                         }
@@ -465,25 +472,39 @@ fn normalize_artifact(artifact: &mut VideoArtifact) -> Result<(), String> {
 }
 
 /// Prompt block describing the named characters, in cast order.
+/// Every non-empty field from the character file is included, so whatever is
+/// written there actually reaches the Writer.
 fn describe_characters(cast: &[Character], names: &[String]) -> String {
     let wanted: HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
     cast.iter()
-        .filter(|c| c.enabled && wanted.contains(c.name))
-        .map(|c| format!(
-            "- {}
-  Age: {}
-  Personality: {}
-  Role: {}
-  Relations: {}",
-            c.name,
-            now_age(c.birth_year),
-            c.personality_prompt,
-            c.role,
-            c.relationship_prompt
-        ))
+        .filter(|c| c.enabled && wanted.contains(c.name.as_str()))
+        .map(|c| {
+            let age = c.age_label();
+            let fields = [
+                ("Nickname", c.nickname.as_str()),
+                ("Age", age.as_str()),
+                ("Role", c.role.as_str()),
+                ("Family role", c.family_role.as_str()),
+                ("Story function", c.story_function.as_str()),
+                ("Profession", c.profession.as_str()),
+                ("Personality", c.personality_prompt.as_str()),
+                ("Speaking style", c.speaking_style.as_str()),
+                ("Catchphrase", c.catchphrase.as_str()),
+                ("Strengths", c.strengths.as_str()),
+                ("Weaknesses", c.weaknesses.as_str()),
+                ("Core values", c.core_values.as_str()),
+                ("Relations", c.relationship_prompt.as_str()),
+            ];
+            let body = fields
+                .iter()
+                .filter(|(_, v)| !v.trim().is_empty())
+                .map(|(k, v)| format!("  {}: {}", k, v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("- {}\n{}", c.name, body)
+        })
         .collect::<Vec<_>>()
-        .join("
-")
+        .join("\n")
 }
 
 fn json_str(v: &Value, key: &str) -> Result<String, String> {
@@ -504,4 +525,44 @@ fn json_str_array(v: &Value, key: &str) -> Result<Vec<String>, String> {
                 .ok_or_else(|| ctx("JSON", format!("Non-string item in '{}'", key)))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn character_file_fields_reach_the_writer_prompt() {
+        crate::characters::init_for_tests();
+        let cast = crate::profiles::profile_by_id("kids_edu").unwrap().cast();
+        let bin = &cast[0];
+
+        let text = describe_characters(cast, &[bin.name.clone()]);
+        assert!(text.contains(&bin.catchphrase));
+        assert!(text.contains(&bin.speaking_style));
+        assert!(text.contains(&bin.core_values));
+        // Only the requested characters are described.
+        assert!(!text.contains(&cast[1].name));
+    }
+
+    #[test]
+    fn normalize_artifact_renumbers_and_repairs() {
+        let seg = |t: &str| VoiceSegment { text: t.into(), speaker: "Narrator".into(), voice_id: None };
+        let scene = |id, motion: &str, segs| Scene {
+            scene_id: id, duration: 4.5, motion: motion.into(), transition: "Nope".into(),
+            visual_prompt: "a cat".into(), voice_segments: segs,
+        };
+        let mut a = VideoArtifact {
+            title: "t".into(),
+            scenes: vec![scene(7, "ZoomIn", vec![seg("b")]), scene(7, "Wobble", vec![seg(" "), seg("a")])],
+        };
+        normalize_artifact(&mut a).unwrap();
+        assert_eq!(a.scenes.iter().map(|s| s.scene_id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(a.scenes[1].motion, "None");
+        assert_eq!(a.scenes[0].transition, Transition::DEFAULT.to_string());
+        assert_eq!(a.scenes[1].voice_segments.len(), 1);
+
+        let mut empty = VideoArtifact { title: "t".into(), scenes: vec![scene(1, "None", vec![seg(" ")])] };
+        assert!(normalize_artifact(&mut empty).is_err());
+    }
 }

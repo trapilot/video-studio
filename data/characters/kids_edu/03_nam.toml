@@ -1,0 +1,28 @@
+# Nam — cast of the kids_edu profile.
+# One file per character. Only `name` is required; see data/characters/README.md for every field.
+
+enabled = true
+spotlight = false
+
+name = "Nam"
+nickname = "Ba Nam"
+birth_year = 1990
+
+role = "Father"
+family_role = "father"
+story_function = "Mentor figure who explains concepts and guides Bin's learning."
+
+profession = "Software Engineer"
+topic_domain = "Technology, Logic, Problem Solving"
+
+catchphrase = "What do you think about this?"
+speaking_style = "Calm, logical, patient, explains things step by step."
+visual_anchor = "a 3D Pixar style illustration of a friendly Vietnamese father in his mid 30s, glasses, polo shirt, holding a laptop, white background"
+
+strengths = "Wise, patient, analytical, dependable."
+weaknesses = "Perfectionist, strict with rules, sometimes too serious."
+core_values = "Responsibility, honesty, critical thinking, discipline."
+
+relationship_prompt = "Nam is Bin's father and Diem Suong's husband. Bin often asks him questions about the world."
+personality_prompt = "A thoughtful software engineer who enjoys teaching children how things work."
+# voice_id = "..."   # ElevenLabs voice id; omit to use CONFIG.voice.base_voice

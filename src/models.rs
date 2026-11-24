@@ -5,36 +5,6 @@ use crate::profiles::*;
 use crate::helper::*;
 use crate::enums::*;
 
-/// A recurring on-screen character. Casts are defined per profile in `src/profiles.rs`.
-#[derive(Debug, Clone)]
-pub struct Character {
-    pub enabled: bool,
-    pub spotlight: bool,
-
-    pub name: &'static str,
-    pub nickname: &'static str,
-    pub voice_id: &'static str,
-    pub birth_year: i32,
-
-    pub role: &'static str,
-    pub family_role: &'static str,
-    pub story_function: &'static str,
-
-    pub profession: &'static str,
-    pub topic_domain: &'static str,
-
-    pub catchphrase: &'static str,
-    pub speaking_style: &'static str,
-    pub visual_anchor: &'static str,
-
-    pub strengths: &'static str,
-    pub weaknesses: &'static str,
-    pub core_values: &'static str,
-
-    pub relationship_prompt: &'static str,
-    pub personality_prompt: &'static str,
-}
-
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct WorkflowMeta {
     pub status: String, // running | cooldown | failed | done | cancelled

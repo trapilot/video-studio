@@ -38,7 +38,7 @@ See [AGENTS.md](AGENTS.md) for the full contract of each stage.
 
 ## Studio profiles
 
-A `StudioProfile` (`src/profiles.rs`) describes one kind of video: what it is, who it is for, how it looks and sounds, how long it is, which rules apply, who appears in it, and how it is published. Profiles are static Rust data in the `PROFILES` array.
+A `StudioProfile` (`src/profiles.rs`) describes one kind of video: what it is, who it is for, how it looks and sounds, how long it is, which rules apply, who appears in it, and how it is published. Profiles are static Rust data in the `PROFILES` array. The recurring cast is not part of the profile struct: it is loaded from data files (see "Characters are data" below).
 
 ### Fields
 
@@ -55,15 +55,14 @@ A `StudioProfile` (`src/profiles.rs`) describes one kind of video: what it is, w
 | `duration_secs` | `(min, max)` target length in seconds, given to the Writer. |
 | `scene_count` | `(min, max)` number of scenes. |
 | `content_rules` | Extra rules appended to the Writer prompt (safety, brand, factual constraints). |
-| `characters` | Recurring cast. Empty (`&[]`) means a narrator-only video. |
 | `publish` | `PublishProfile`: `description`, `tags`, `youtube_category`, `made_for_kids`. |
 
 ### Built-in profiles
 
 | id | Name | Format | Cast | YouTube category | Made for kids |
 |---|---|---|---|---|---|
-| `kids_edu` (default) | Bin's Family Adventures | Animated educational story for children aged 4-8, told by a family cast | `KIDS_EDU_CAST` (Bin, Hoang Yen, Nam, Diem Suong) | 27 Education | yes |
-| `explainer` | Quick Explainers | Narrated explainer, one idea in under a minute, for curious adults and teenagers | none (narrator) | 28 Science & Technology | no |
+| `kids_edu` (default) | Bin's Family Adventures | Animated educational story for children aged 4-8, told by a family cast | `data/characters/kids_edu/` (4 files: Bin, Hoang Yen, Nam, Diem Suong) | 27 Education | yes |
+| `explainer` | Quick Explainers | Narrated explainer, one idea in under a minute, for curious adults and teenagers | none (narrator-only) | 28 Science & Technology | no |
 
 ### Selecting a profile
 
@@ -80,12 +79,13 @@ STUDIO_PROFILE=explainer cargo run
 The startup banner shows what is active:
 
 ```text
-🚀 Video Studio v0.1.0 | profile: explainer (Quick Explainers)
+🚀 Video Studio v0.1.0 | profile: kids_edu (Bin's Family Adventures) | cast: Quốc Khánh, Hoàng Yến, Nam, Diễm Sương
+🚀 Video Studio v0.1.0 | profile: explainer (Quick Explainers) | cast: narrator only
 ```
 
 ### Cast or narrator-only
 
-| | With a cast | Narrator-only (`characters: &[]`) |
+| | With a cast | Narrator-only (no characters) |
 |---|---|---|
 | Planner returns | topic, main character, spotlight and supporting characters (validated with `profile.character()`) | topic only; character fields are forced empty |
 | Writer speakers | cast member names only | `"Narrator"` for every segment |
@@ -105,7 +105,7 @@ The Writer rules are numbered in this order: generic rules (language, duration, 
 4. Write a `visual_style` that works as a prefix for every image prompt: medium, lighting, composition, and "no text" if you don't want garbled lettering.
 5. Set `duration_secs` and `scene_count`. Keep them consistent (a 15 second video does not need 8 scenes).
 6. Add `content_rules`: short imperative sentences for the things that must always or never happen.
-7. Decide on a cast or use `&[]`.
+7. Decide on a cast. For a cast, create `data/characters/<id>/` with one `.toml` file per character after step 9 (see [data/characters/README.md](data/characters/README.md)); for narrator-only, create nothing.
 8. Fill in `publish`. Set `made_for_kids: true` for anything aimed at children (COPPA).
 9. Append the profile to `PROFILES`, then run `cargo test` and `cargo check`.
 10. Try it with `STUDIO_PROFILE=<id> cargo run` (this spends API credits and publishes publicly, see Quick start).
@@ -131,7 +131,6 @@ StudioProfile {
         "End with a short call to action.",
         "Visual prompts must not contain written text or brand logos.",
     ],
-    characters: &[],
     publish: PublishProfile {
         description: "A quick look at a handy gadget",
         tags: &["gadgets", "product", "review", "shorts"],
@@ -141,51 +140,21 @@ StudioProfile {
 },
 ```
 
-### Example: a profile with a cast
+### Characters are data
 
-Define the cast as a `const` and reference it from the profile (`characters: STUDY_BUDDIES_CAST`). Exactly the fields of `Character` in `src/models.rs` are required.
+The cast is not written in Rust. Each character is one TOML file in `data/characters/<profile_id>/` (for example `data/characters/kids_edu/01_bin.toml`). To add a character, drop in a new file and restart; no rebuild is needed. Files load in file-name order, which is the cast order in prompts. Only `name` is required, and a misspelled field is a startup error.
 
-```rust
-pub const STUDY_BUDDIES_CAST: &[Character] = &[
-    Character {
-        enabled: true,
-        spotlight: true,            // can be chosen as main character
-
-        name: "Mia",                // unique; the Writer matches speaker == name
-        nickname: "Mia",
-        voice_id: &CONFIG.voice.base_voice, // or a specific ElevenLabs voice id
-        birth_year: 2010,
-
-        role: "Protagonist",
-        family_role: "student",
-        story_function: "Asks the questions the viewer is thinking.",
-
-        profession: "Student",
-        topic_domain: "Study tips, memory, focus",
-
-        catchphrase: "Wait, how does that work?",
-        speaking_style: "Quick, curious, a little sarcastic.",
-        visual_anchor: "a flat vector illustration of a teenage girl with a green hoodie and round glasses, friendly expression, simple pastel background",
-
-        strengths: "Curious, persistent.",
-        weaknesses: "Procrastinates, easily distracted.",
-        core_values: "Honesty, effort.",
-
-        relationship_prompt: "Mia studies with Theo, who explains things calmly.",
-        personality_prompt: "A curious high-school student who learns by asking questions.",
-    },
-    // Add a second character with spotlight: false as a supporting role.
-];
+```toml
+# data/characters/study_buddies/01_mia.toml
+name = "Mia"
+spotlight = true          # can be the main character
+birth_year = 2010
+speaking_style = "Quick, curious, a little sarcastic."
+visual_anchor = "a flat vector illustration of a teenage girl with a green hoodie and round glasses, simple pastel background"
+personality_prompt = "A curious high-school student who learns by asking questions."
 ```
 
-Tips for good characters:
-
-- At least one enabled character must have `spotlight: true` (`cargo test` checks this). Only spotlight characters can be the main character.
-- Names must be unique inside a profile, and `"Narrator"` is reserved.
-- `visual_anchor` is the image-style prefix when the character is the main one. Keep every character's anchor in the same art style as the profile's visual identity.
-- `personality_prompt` and `relationship_prompt` are what the LLM actually reads. Write them as concrete behavior, not adjectives alone.
-- `catchphrase` and `speaking_style` document the voice; keep them consistent with the personality text.
-- Set `enabled: false` to retire a character without deleting it.
+The cast must contain at least one enabled `spotlight = true` character, names are unique inside a profile, and `"Narrator"` is reserved. The folder name must match a profile id. A profile with no folder (or no enabled characters) is narrator-only. The full field reference, validation rules and tips are in [data/characters/README.md](data/characters/README.md).
 
 ---
 
@@ -214,6 +183,7 @@ Warning: `cargo run` starts a loop that never exits. Every iteration calls paid 
 | Variable | Used by | Purpose |
 |---|---|---|
 | `STUDIO_PROFILE` | `src/profiles.rs` | Profile id to produce. Empty or unset means `kids_edu`. Unknown id exits at startup. |
+| `STUDIO_DATA_DIR` | `src/main.rs`, `src/characters.rs` | Data folder that holds `characters/<profile_id>/*.toml`. Unset means `./data`. |
 | `APP_DEBUG` | `src/scheduler.rs` | `True` revives sessions that hit `max_retry` immediately instead of waiting. Any other value is off. |
 | `GEMINI_API_KEY` | `src/api/gemini.rs` | Script LLM (active). |
 | `CF_ACCOUNT_ID`, `CF_API_TOKEN` | `src/api/cloudflare.rs` | Image generation (active). |
@@ -306,17 +276,27 @@ src/
 │   ├── microsoft_edge.rs
 │   ├── pollinations.rs
 │   └── mod.rs
+├── characters.rs       # loads and validates data/characters/<profile_id>/*.toml
 ├── config.rs           # studio-wide settings: base voice, TTS, feature flags
 ├── db.rs               # SQLite: topic_history + resumable workflow_state
 ├── enums.rs            # AgentNode, Motion, Transition, VoiceMode
 ├── helper.rs           # time, backoff, media detection, error context
 ├── main.rs             # entrypoint: select profile, start scheduler
-├── models.rs           # VideoState, Character, VideoArtifact, Scene, VideoTimeline
-├── profiles.rs         # StudioProfile, PROFILES, casts, active_profile
+├── models.rs           # VideoState, VideoArtifact, Scene, VideoTimeline
+├── profiles.rs         # StudioProfile, PROFILES, active_profile, cast() lookup
 ├── renderer.rs         # provider selection, asset generation, FFmpeg render
 ├── scheduler.rs        # main loop, retry/backoff, session resume
 ├── uploader.rs         # YouTube + TikTok upload
 └── workflow.rs         # Planner -> Writer -> Builder -> Renderer -> Publisher
+
+data/
+└── characters/
+    ├── README.md       # how to add a character
+    └── kids_edu/       # one folder per profile id, one .toml per character
+        ├── 01_bin.toml
+        ├── 02_yen.toml
+        ├── 03_nam.toml
+        └── 04_suong.toml
 ```
 
 ---
@@ -332,7 +312,9 @@ cargo test -- --ignored   # real FFmpeg render on generated assets (needs ffmpeg
 
 `cargo test` runs:
 
-- `profiles::tests::profiles_are_well_formed`: every profile has a unique lowercase-slug id, the default exists, duration and scene ranges are sane, a cast has a spotlight character, names are unique, and `"Narrator"` is not used as a character name.
+- `profiles::tests::profiles_are_well_formed`: every profile has a unique lowercase-slug id, the default profile exists, and duration and scene ranges are sane. Casts are validated by the loader at startup instead.
+- `characters::tests::{repo_data_loads, minimal_file_only_needs_a_name, rejects_bad_data}`: the repo's `data/characters` loads (4 kids_edu characters, explainer has none), a file with only `name` is valid, and bad data (unknown profile folder, duplicate name, `Narrator`, no spotlight, misspelled field) is rejected.
+- workflow tests: character file fields reach the Writer prompt, and artifact normalization.
 - `db::tests`: topics are scoped per profile; resume picks the latest unfinished session, even when a finished one was saved later.
 - `helper::tests`: media sniffing rejects empty, truncated and HTML/JSON error bodies; backoff doubles and caps; titles truncate on character boundaries.
 - `renderer::tests::fade_never_exceeds_half_a_clip`, and the ignored `renders_mixed_motions_short_scenes_and_single_scene`, which renders real clips with FFmpeg (mixed motions, a 0.6 s scene, an unknown transition, a one-scene video) and checks the final length and 1080x1920 size.

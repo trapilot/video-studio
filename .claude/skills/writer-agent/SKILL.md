@@ -8,7 +8,7 @@ description: Work on the Writer stage — the LLM prompt that produces the Video
 **Code:** `AgentNode::Writer` arm in `src/workflow.rs`. Schema in `src/models.rs` (`VideoArtifact`, `Scene`, `VoiceSegment`).
 
 ## Contract
-- Input: `target_topic`, the character selection, and the profile (`state.profile()`): name, format, audience, tone, visual style, duration, scene count, language, `content_rules`, cast.
+- Input: `target_topic`, the character selection, and the profile (`state.profile()`): name, format, audience, tone, visual style, duration, scene count, language, `content_rules`, and the cast from `data/characters/` (`profile.cast()`).
 - Output: `state.final_json = Some(VideoArtifact)`, then moves to `AgentNode::Builder` and saves state.
 - After parsing, each `voice_segment.voice_id` is filled from the speaker's `Character.voice_id` (looked up with `profile.character()`), or `CONFIG.voice.base_voice` for the narrator and unknown speakers.
 
@@ -28,8 +28,8 @@ If the change is incompatible, also bump `APP_VERSION` in `src/db.rs`.
 
 ## Prompt rules to preserve
 - The prompt is generated from the profile. Nothing about audience, length or language is hardcoded.
-- Visual style: the main character's `visual_anchor` with a cast, else `profile.visual_style`.
-- With a cast, speakers are the cast. Without one, every segment uses `"Narrator"` (`profiles::NARRATOR`).
+- Visual style: the main character's `visual_anchor` with a cast (empty anchor falls back to `profile.visual_style`), else `profile.visual_style`.
+- With a cast, speakers are the cast. `describe_characters` in `workflow.rs` gives the LLM every non-empty field of each chosen character (nickname, age, role, family role, story function, profession, personality, speaking style, catchphrase, strengths, weaknesses, core values, relations), so a new field in `Character` must be added to its list to reach the prompt. Without one, every segment uses `"Narrator"` (`profiles::NARRATOR`).
 - Rules are numbered in this order: generic rules (language, duration range, scene range, at least one voice_segment per scene, still-image visual prompts, no invented motion/transition names), then cast rules, then `profile.content_rules`.
 - Kid-specific rules (dialogue in every scene, kid-friendly visuals, English only) live in the `kids_edu` profile's `content_rules`, not in the Writer code.
 - Output is parsed with `responseMimeType: application/json` (`build_content(..., true)`), so keep the prompt asking for JSON only.

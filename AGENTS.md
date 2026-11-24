@@ -30,12 +30,13 @@ A `StudioProfile` is one kind of video. The active profile is chosen by the `STU
 | `visual_style` | Writer | Image style when there is no cast. |
 | `duration_secs`, `scene_count` | Writer | Target length and scene range. |
 | `content_rules` | Writer | Extra numbered rules appended to the prompt. |
-| `characters` | Planner, Writer | Recurring cast. Empty means narrator-only. |
 | `publish` | Publisher | `description`, `tags`, `youtube_category`, `made_for_kids`. |
 
-Built-in profiles: `kids_edu` (family cast `KIDS_EDU_CAST`, made for kids, category 27) and `explainer` (narrator-only, general audience, category 28). To add one, see the `add-profile` skill or the README.
+Built-in profiles: `kids_edu` (family cast from `data/characters/kids_edu/`, made for kids, category 27) and `explainer` (narrator-only, general audience, category 28). To add one, see the `add-profile` skill or the README.
 
-Helpers: `StudioProfile::has_cast()`, `StudioProfile::character(name)`, `profiles::profile_by_id`, `profiles::active_profile`. `cargo test` validates every profile.
+The cast is not a profile field. It is data: one TOML file per character in `data/characters/<profile_id>/` (`STUDIO_DATA_DIR` overrides `./data`), loaded once at startup by `characters::init` (`src/characters.rs`). A profile with no folder or no enabled characters is narrator-only. See `data/characters/README.md`.
+
+Helpers: `StudioProfile::cast()` (the loaded characters, in file-name order), `StudioProfile::has_cast()` (any enabled character), `StudioProfile::character(name)` (enabled characters only), `profiles::profile_by_id`, `profiles::active_profile`. `cargo test` validates every profile.
 
 ---
 
@@ -83,7 +84,7 @@ The agent sets `target_topic`, `main_character`, `spotlight_characters` and `sup
 **What the profile controls**
 
 * The prompt: name, format, audience, tone, language, `topic_brief`.
-* Cast or no cast. With a cast, the prompt lists spotlight and relation characters and requires the main character to be a spotlight character. Names are validated with `profile.character()`; an unknown name returns `Err` and the scheduler retries. Without a cast, whatever the LLM returns for the character fields is discarded and the fields are set empty.
+* Cast or no cast. With a cast (from the character files), the prompt lists spotlight characters (`name`, `topic_domain`, age, `personality_prompt`, `relationship_prompt`) and relation characters (`name`, `profession`, age, `role`, `relationship_prompt`) and requires the main character to be a spotlight character. Names are validated with `profile.character()`; an unknown name returns `Err` and the scheduler retries. Without a cast, whatever the LLM returns for the character fields is discarded and the fields are set empty.
 
 **Location:** `AgentNode::Planner` arm in `src/workflow.rs`.
 
@@ -98,7 +99,8 @@ Generate the full script for a short vertical video.
 **Input**
 
 * `target_topic` and the character selection
-* The profile: format, audience, tone, visual style, duration, scene count, language, `content_rules`, cast
+* The profile: format, audience, tone, visual style, duration, scene count, language, `content_rules`
+* The cast from `data/characters/`: every non-empty field of each chosen character (nickname, age, role, family role, story function, profession, personality, speaking style, catchphrase, strengths, weaknesses, core values, relations)
 
 **Output**
 
@@ -125,12 +127,12 @@ A `VideoArtifact` stored in `state.final_json`:
 }
 ```
 
-After parsing, each segment gets `voice_id`: the cast member's `voice_id`, or `CONFIG.voice.base_voice` for any other speaker. `motion` and `transition` must be values from `Motion::ALL` and `Transition::ALL`; the prompt lists them from those arrays.
+After parsing, each segment gets `voice_id`: the cast member's `voice_id` (empty in the file means the base voice), or `CONFIG.voice.base_voice` for any other speaker. `motion` and `transition` must be values from `Motion::ALL` and `Transition::ALL`; the prompt lists them from those arrays.
 
 **What the profile controls**
 
 * Header: name, format, audience, tone.
-* Visual style: the main character's `visual_anchor` with a cast, otherwise `profile.visual_style`.
+* Visual style: the main character's `visual_anchor` with a cast (an empty anchor falls back to `profile.visual_style`), otherwise `profile.visual_style`.
 * Voice: with a cast, the character descriptions; without, speaker must be `"Narrator"` (`profiles::NARRATOR`) for every segment, speaking to the viewer.
 * Rules, numbered in this order: generic rules (language, duration range, scene range, at least one voice_segment per scene, still-image visual prompts, no invented motion or transition names), then cast rules (cast only: use only provided characters as speakers; the main character drives the story; narrator-only: narration only, no dialogue), then `profile.content_rules`.
 

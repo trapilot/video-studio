@@ -8,7 +8,7 @@ Architecture and agent contracts live in @AGENTS.md. This file covers how the co
 cargo build                 # compile
 cargo check                 # fast type-check (use after every edit)
 cargo clippy                # lints
-cargo test                  # unit tests (profiles, DB, media sniffing, backoff, fades)
+cargo test                  # unit tests (profiles, characters, workflow, DB, media sniffing, backoff, fades)
 cargo test -- --ignored     # real FFmpeg render test on generated assets (needs ffmpeg, no API calls)
 cargo run                   # start the scheduler loop (runs forever, calls paid APIs)
 STUDIO_PROFILE=<id> cargo run  # pick a profile from src/profiles.rs (default: kids_edu)
@@ -17,7 +17,7 @@ APP_DEBUG=True cargo run    # debug: auto-revive sessions that hit max_retry ins
 
 - Requires `ffmpeg` and `ffprobe` on PATH, and a `.env` copied from `.env.example`.
 - Uses `Duration::from_mins`, so it needs a recent stable Rust (1.91+).
-- Tests live next to the code (`#[cfg(test)]` modules in `profiles.rs`, `db.rs`, `helper.rs`, `renderer.rs`). Verify with `cargo check` and `cargo test`; run `cargo test -- --ignored` after touching FFmpeg code. Don't `cargo run` without asking: it spends API credits and can upload to YouTube/TikTok.
+- Tests live next to the code (`#[cfg(test)]` modules in `profiles.rs`, `characters.rs`, `workflow.rs`, `db.rs`, `helper.rs`, `renderer.rs`). Verify with `cargo check` and `cargo test`; run `cargo test -- --ignored` after touching FFmpeg code. Don't `cargo run` without asking: it spends API credits and can upload to YouTube/TikTok.
 
 ## Code map
 
@@ -28,8 +28,10 @@ APP_DEBUG=True cargo run    # debug: auto-revive sessions that hit max_retry ins
 | LLM, image, TTS provider selection + FFmpeg rendering | `src/renderer.rs` (`build_content`, `generate_scene_visual`, `generate_scene_audio`, `ffmpeg_render`) |
 | Uploads | `src/uploader.rs` |
 | Provider HTTP clients | `src/api/*.rs` (one file per provider, registered in `src/api/mod.rs`) |
-| Studio profiles (video types, casts, selection) | `src/profiles.rs` (`StudioProfile`, `PROFILES`, `KIDS_EDU_CAST`, `active_profile`) |
-| State, character struct, artifact schema | `src/models.rs` (`VideoState`, `Character`, `VideoArtifact`, `Scene`, `VideoTimeline`) |
+| Studio profiles (video types, selection) | `src/profiles.rs` (`StudioProfile`, `PROFILES`, `active_profile`, `cast()`) |
+| Characters: `Character` struct, loader, validation | `src/characters.rs` (`init`, `cast_for`) |
+| Character data, one TOML per character | `data/characters/<profile_id>/*.toml` (reference: `data/characters/README.md`) |
+| State, artifact schema | `src/models.rs` (`VideoState`, `VideoArtifact`, `Scene`, `VideoTimeline`) |
 | Enums (`AgentNode`, `Motion`, `Transition`, `VoiceMode`) | `src/enums.rs` |
 | Static config (output video size/fps, base voice, TTS, feature flags) | `src/config.rs` → `CONFIG` |
 | Persistence (SQLite `data_history.db`) | `src/db.rs` |
@@ -62,6 +64,7 @@ Swapping a provider means changing one call in `src/renderer.rs`. Workflow code 
 - LLM-facing enums (`Motion`, `Transition`) need matching `ALL`, `Display` and `FromStr` entries. The Writer prompt is built from `ALL`.
 - Logs use emoji-prefixed `println!` per node (`🧠[Planner]`, `✍️ [Writer]`, …). Match that style.
 - Never `unwrap()` LLM output. Use the `json_str` / `json_str_array` helpers in `workflow.rs` and validate character names against `profile.character()`.
+- Characters are data: never hardcode a cast in Rust; add a TOML file under `data/characters/<profile_id>/` (loaded at startup, no rebuild; see `data/characters/README.md`).
 - Never hardcode audience, format, language or publish metadata in workflow/uploader code. Put it in the profile.
 - Profile ids are persisted (output folders, `topic_history`, saved sessions): don't rename them.
 - Every workflow arm ends with `db.save_state(&state.reset())` after moving `current_node` forward.
