@@ -1,11 +1,11 @@
-# Hoàng Yến — cast of the kids_edu profile.
-# One file per character. Only `name` is required; see data/characters/README.md for every field.
+# Hoàng Yến: cast of the kids_edu profile.
+# One file per character. Only `name` is required; see data/characters/README.md.
 
 enabled = true
 spotlight = false
 
 name = "Hoàng Yến"
-nickname = "Yến"
+nickname = "Hoàng Yến"
 birth_year = 2020
 
 role = "Best Friend"
@@ -17,7 +17,7 @@ topic_domain = "Learning, Friendship, Kindness"
 
 catchphrase = "Để mình giúp nhé!"
 speaking_style = "Gentle, polite, calm, encouraging and supportive."
-visual_anchor = "a 3D Pixar style illustration of a cute Vietnamese girl age 6, long black hair with pink ribbons, pink dress, holding books, warm smile, white background"
+visual_template = "a 3D Pixar style illustration of a cute Vietnamese girl age {age}, long black hair with pink ribbons, pink dress, holding books, warm smile, white background"
 
 strengths = "Intelligent, hardworking, loyal, responsible, brave when protecting friends."
 weaknesses = "Can worry too much, dislikes conflict, sometimes overthinks."
@@ -25,4 +25,5 @@ core_values = "Kindness, friendship, honesty, responsibility."
 
 relationship_prompt = "Hoang Yen is Bin's classmate and best friend. She often helps him solve problems and stands up for him when needed."
 personality_prompt = "A sweet and intelligent girl who loves learning and always supports her friends."
-# voice_id = "..."   # ElevenLabs voice id; omit to use CONFIG.voice.base_voice
+
+# voice_id = "..."   # TTS voice for this character; omit to use the default voice

@@ -1,28 +1,27 @@
 ---
 name: add-provider
-description: Add or swap an AI provider (LLM, image, or TTS) under src/api/. Use when integrating a new API (OpenAI, OpenRouter, fal, etc.) or switching which provider a pipeline stage uses.
+description: Add or swap an AI provider (LLM, image, TTS) behind ProviderManager: implement ProviderClient in src/providers/, register it in AppState::build, add the Provider enum variant and KEY_n env vars. Use when integrating a new API or changing which provider an agent uses.
 ---
 
 # Add / swap a provider
 
-Providers are separate from workflow logic (AGENTS.md principle 3). Workflow arms call `renderer::*`, and only `renderer.rs` calls `api::*`.
+Agents never call HTTP APIs directly; they go through `ProviderManager` (`src/provider.rs`).
 
 ## Steps
-1. Create `src/api/<name>.rs` and add `pub mod <name>;` to `src/api/mod.rs`.
-2. Match the signature of the slot you're filling:
-   - LLM: `pub async fn generate_script(client: &Client, system: &str, user: &str, is_json: bool) -> Result<String, String>`
-   - Image: `pub async fn generate_image(client: &Client, prompt: &str) -> Result<Vec<u8>, String>`
-   - TTS: `pub async fn generate_tts(client: &Client, text: &str, voice: &str) -> Result<Vec<u8>, String>`
-3. Read the key with `env::var("X_API_KEY").map_err(|_| "Missing X_API_KEY")?` and add it to `.env.example`.
-4. Parse responses with `super::read_json(res, "Name")` or `super::read_bytes` (non-2xx becomes an `Err` with the body) and map send errors with `super::send_err` (drops the URL). Never `unwrap()`. Send keys in headers, never in the URL.
-5. Switch the call site in `src/renderer.rs`: `build_content` (LLM), `generate_scene_visual` (image), or `generate_scene_audio` (TTS).
-6. Callers check the bytes with `helper::expect_media`. For a new format, extend `helper::detect_media`.
-7. `cargo check`.
+1. Add a variant to `Provider` in `src/provider.rs` (strum lowercase).
+2. Create `src/providers/<name>.rs` with `pub struct XClient;` implementing `ProviderClient`: `provider()`, `config()` (`daily_limit`, `retry_after`, ...), `call(&ProviderRequest, &ApiCredential)`, `is_auth_error`, `is_quota_error`. Handle only the request kinds you support (`Script`, `Image`, `Audio`); return `ProviderError::NotSupported` otherwise.
+3. Export it in `src/providers/mod.rs`.
+4. Register in `AppState::build` (`src/main.rs`): `providers.register_with_keys(Arc::new(providers::XClient), <concurrency>, "X").await`. Keys are read from `X_KEY_1`, `X_KEY_2`, ... (numbered from 1, stops at the first gap) and optional `X_ACCOUNT_n` (becomes `credential.account_id`). Add the names to `.env.example`.
+5. Switch the call site in the agent: `state.services.providers.acquire(&provider::Provider::X)` then `guard.call(ProviderRequest::...)` and `into_text()` / `into_bytes()`.
+6. Validate bytes before saving (`helper::is_image` for images) and write atomically (`helper::write_atomic`).
+
+## Rules
+- Use `self.read_json` / `self.read_bytes` (they map non-2xx to errors and call `is_auth_error`/`is_quota_error`). A quota error blocks that key for `retry_after` and the manager rotates.
+- Send keys in headers, never in the URL; map reqwest errors with `e.without_url()`. Never log keys.
+- Never `unwrap()` a response.
 
 ## Reference implementations
-- `src/api/gemini.rs`: LLM with JSON mode
-- `src/api/cloudflare.rs`: image returned as base64 JSON
-- `src/api/pollinations.rs`: image returned as raw bytes via GET
-- `src/api/elevenlabs.rs`: TTS that uses `CONFIG.tts`
+`src/providers/gemini.rs` (JSON script), `src/providers/cf_worker.rs` (base64 image, needs account id), `src/providers/eleven_labs.rs` (audio bytes).
 
-Don't log API keys or put them in URLs that get printed in errors.
+## Verify
+`cargo check`, `cargo test`. Real API calls spend credits: ask first.

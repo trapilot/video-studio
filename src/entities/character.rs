@@ -7,14 +7,13 @@
 //! See `data/characters/README.md` for the field reference.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use chrono::{Datelike, Utc};
 use serde::Deserialize;
 
-use crate::config::CONFIG;
-use crate::helper::now_age;
-use crate::profiles::{PROFILES, NARRATOR};
+use super::profile::{PROFILES, NARRATOR};
 
 /// Default data folder, overridable with `STUDIO_DATA_DIR`.
 pub const DEFAULT_DATA_DIR: &str = "./data";
@@ -30,14 +29,14 @@ pub struct Character {
     #[serde(default)]
     pub spotlight: bool,
 
-    /// Unique within the profile. The Writer uses it as the speaker name.
+    /// Unique within the profile. The LLM uses it (or `nickname`) as the actor/speaker name.
     pub name: String,
     #[serde(default)]
     pub nickname: String,
-    /// ElevenLabs voice id. Empty = `CONFIG.voice.base_voice`.
+    /// TTS voice for this character. Empty = the default voice.
     #[serde(default)]
     pub voice_id: String,
-    /// Used to tell the LLM the character's age. Omit for ageless characters.
+    /// Used to compute the age shown to the LLM and `{age}` in `visual_template`.
     #[serde(default)]
     pub birth_year: Option<i32>,
 
@@ -57,9 +56,9 @@ pub struct Character {
     pub catchphrase: String,
     #[serde(default)]
     pub speaking_style: String,
-    /// Image-style prefix used when this character is the main character.
+    /// What the character looks like, for image prompts. `{age}` is replaced with the current age.
     #[serde(default)]
-    pub visual_anchor: String,
+    pub visual_template: String,
 
     #[serde(default)]
     pub strengths: String,
@@ -81,19 +80,61 @@ fn yes() -> bool {
 }
 
 impl Character {
-    pub fn voice(&self) -> &str {
-        if self.voice_id.trim().is_empty() {
-            CONFIG.voice.base_voice
-        } else {
-            &self.voice_id
-        }
+    pub fn age(&self) -> Option<i32> {
+        self.birth_year.map(|y| Utc::now().year() - y)
     }
 
     /// Age for prompts: a number, or "unspecified" when `birth_year` is omitted.
     pub fn age_label(&self) -> String {
-        self.birth_year
-            .map(|y| now_age(y).to_string())
+        self.age()
+            .map(|a| a.to_string())
             .unwrap_or_else(|| "unspecified".to_string())
+    }
+
+    /// `visual_template` with `{age}` filled in.
+    pub fn visual_anchor(&self) -> String {
+        self.visual_template.replace("{age}", &self.age_label())
+    }
+
+    /// True if `name` refers to this character by full name or nickname.
+    pub fn answers_to(&self, name: &str) -> bool {
+        let name = name.trim();
+        self.name == name || (!self.nickname.is_empty() && self.nickname == name)
+    }
+
+    pub fn voice(&self) -> Option<&str> {
+        let v = self.voice_id.trim();
+        (!v.is_empty()).then_some(v)
+    }
+
+    /// Prompt block with every non-empty field, so whatever is written in the
+    /// file actually reaches the LLM.
+    pub fn describe(&self) -> String {
+        let age = self.age_label();
+        let anchor = self.visual_anchor();
+        let fields = [
+            ("Nickname", self.nickname.as_str()),
+            ("Age", age.as_str()),
+            ("Role", self.role.as_str()),
+            ("Family role", self.family_role.as_str()),
+            ("Story function", self.story_function.as_str()),
+            ("Profession", self.profession.as_str()),
+            ("Personality", self.personality_prompt.as_str()),
+            ("Speaking style", self.speaking_style.as_str()),
+            ("Catchphrase", self.catchphrase.as_str()),
+            ("Strengths", self.strengths.as_str()),
+            ("Weaknesses", self.weaknesses.as_str()),
+            ("Core values", self.core_values.as_str()),
+            ("Relations", self.relationship_prompt.as_str()),
+            ("Appearance", anchor.as_str()),
+        ];
+        let body = fields
+            .iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .map(|(k, v)| format!("  {}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("- {}\n{}", self.name, body)
     }
 }
 
@@ -151,18 +192,25 @@ fn load_cast(dir: &Path) -> Result<Vec<Character>, String> {
         }
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("{}: {}", path.display(), e))?;
-        let character: Character = toml::from_str(&text)
+        let mut character: Character = toml::from_str(&text)
             .map_err(|e| format!("{}: {}", path.display(), e))?;
+        character.name = character.name.trim().to_string();
+        character.nickname = character.nickname.trim().to_string();
 
-        let name = character.name.trim();
-        if name.is_empty() {
+        if character.name.is_empty() {
             return Err(format!("{}: `name` is empty", path.display()));
         }
-        if name == NARRATOR {
-            return Err(format!("{}: \"{}\" is reserved for narrator-only profiles", path.display(), NARRATOR));
+        if character.answers_to(NARRATOR) {
+            return Err(format!("{}: \"{}\" is reserved for narration", path.display(), NARRATOR));
         }
-        if cast.iter().any(|c| c.name == character.name) {
-            return Err(format!("{}: duplicate character name \"{}\"", path.display(), character.name));
+        // Names and nicknames must all be distinct, or "who is speaking" becomes ambiguous.
+        if let Some(other) = cast.iter().find(|c| {
+            c.answers_to(&character.name) || (!character.nickname.is_empty() && c.answers_to(&character.nickname))
+        }) {
+            return Err(format!(
+                "{}: name/nickname of \"{}\" clashes with \"{}\"",
+                path.display(), character.name, other.name
+            ));
         }
         cast.push(character);
     }
@@ -177,7 +225,7 @@ fn load_cast(dir: &Path) -> Result<Vec<Character>, String> {
     Ok(cast)
 }
 
-fn read_sorted(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+fn read_sorted(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {}", dir.display(), e))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -203,9 +251,9 @@ mod tests {
         init_for_tests();
         let kids = cast_for("kids_edu");
         assert_eq!(kids.len(), 4);
-        assert_eq!(kids[0].nickname, "Bin");
+        assert!(kids[0].answers_to("Bin") && kids[0].answers_to("Quốc Khánh"));
         assert!(kids[0].spotlight);
-        assert_eq!(kids[0].voice(), CONFIG.voice.base_voice);
+        assert!(!kids[0].visual_anchor().contains("{age}"));
         assert!(cast_for("explainer").is_empty());
     }
 
@@ -217,14 +265,14 @@ mod tests {
     #[test]
     fn minimal_file_only_needs_a_name() {
         let root = std::env::temp_dir().join(format!("vs_chars_{}", uuid::Uuid::new_v4()));
-        let dir = root.join("characters/kids_edu");
-        write(&dir, "a.toml", "name = \"Mia\"\nspotlight = true\n");
+        write(&root.join("characters/kids_edu"), "a.toml", "name = \"Mia\"\nspotlight = true\n");
         let casts = load_all(&root).unwrap();
         let _ = std::fs::remove_dir_all(&root);
 
         let mia = &casts["kids_edu"][0];
         assert!(mia.enabled);
         assert_eq!(mia.age_label(), "unspecified");
+        assert_eq!(mia.voice(), None);
     }
 
     #[test]
@@ -232,6 +280,7 @@ mod tests {
         let cases: &[(&str, &[(&str, &str)])] = &[
             ("unknown_profile", &[("a.toml", "name = \"A\"\nspotlight = true")]),
             ("kids_edu", &[("a.toml", "name = \"A\"\nspotlight = true"), ("b.toml", "name = \"A\"")]),
+            ("kids_edu", &[("a.toml", "name = \"A\"\nspotlight = true"), ("b.toml", "name = \"B\"\nnickname = \"A\"")]),
             ("kids_edu", &[("a.toml", "name = \"Narrator\"\nspotlight = true")]),
             ("kids_edu", &[("a.toml", "name = \"A\"")]),                       // no spotlight
             ("kids_edu", &[("a.toml", "name = \"A\"\nspotlite = true")]),      // typo'd field

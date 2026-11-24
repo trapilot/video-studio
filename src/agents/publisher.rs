@@ -1,0 +1,92 @@
+
+use std::sync::Arc;
+use std::collections::HashMap;
+use async_trait::async_trait;
+
+use crate::AppState;
+use crate::agent::*;
+use crate::models::*;
+use crate::entities::*;
+use crate::uploader;
+
+
+pub struct PublisherAgent;
+
+#[async_trait]
+impl Agent for PublisherAgent {
+    async fn run(&self, state: &Arc<AppState>, job: &Job) -> Result<(), AgentError> {
+        println!("📤 [Publisher] Publishing video...");
+        let profile = job_profile(state, job).await?;
+        
+        let video_metadata: VideoMetadata =
+            serde_json::from_str(&job.payload)
+            .map_err(|e| AgentError::Decode(e.to_string()))?;
+
+        let mut configs = HashMap::new();
+        configs.insert(uploader::Channel::Youtube, uploader::ChannelConfig::Youtube {
+            category_id: profile.publish.youtube_category.to_string(),
+            tags: profile.publish.tags.iter().map(|t| t.to_string()).collect(),
+            description: profile.publish.description.to_string(),
+            made_for_kids: profile.publish.made_for_kids,
+        });
+        configs.insert(uploader::Channel::Tiktok, uploader::ChannelConfig::Tiktok {
+            privacy_level: "PUBLIC_TO_EVERYONE".into(),
+            disable_comment: true,
+        });
+
+        let results = state.services.uploaders
+            .upload_all(
+                &state.services.db,
+                &video_metadata.video_path,
+                &video_metadata.title,
+                configs
+            )
+            .await;
+
+        let mut publish_errors = uploader::UploaderError::default();
+        let mut success_count = 0;
+
+        for (channel, res) in &results {
+            match res {
+                Ok(_) => success_count += 1,
+                Err(e) => {
+                    println!("Error when uploading {:?}: {}", channel, e);
+
+                    match channel {
+                        uploader::Channel::Youtube => publish_errors.youtube = Some(e.clone()),
+                        uploader::Channel::Tiktok => publish_errors.tiktok = Some(e.clone()),
+                    }
+                }
+            }
+        }
+        
+        let publish_state = uploader::UploaderState {
+            all_uploaded: success_count == results.len() && results.len() > 0,
+            any_uploaded: success_count > 0,
+            errors: publish_errors,
+            output_dir: std::path::Path::new(&video_metadata.video_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string()),
+        };
+        
+        if !publish_state.any_uploaded {
+            return Err(AgentError::Execute("Upload error....".to_string()));
+        }
+
+        let payload =
+            serde_json::to_string(&publish_state)
+            .map_err(|e| AgentError::Encode(e.to_string()))?;
+
+        state.services.db
+            .handoff_job(job, AgentType::Cleaner, payload.clone())
+            .await
+            .map_err(|e| AgentError::Handoff(e.to_string()))?;
+
+        state.services.db
+            .complete_job(&job.id, payload)
+            .await
+            .map_err(|e| AgentError::Handoff(e.to_string()))?;
+        
+        Ok(())
+    }
+}

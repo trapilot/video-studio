@@ -1,75 +1,80 @@
 # CLAUDE.md
 
-Architecture and agent contracts live in @AGENTS.md. This file covers how the code is actually laid out and how to work in it.
+Architecture and agent contracts live in @AGENTS.md. This file covers how the code is laid out and how to work in it.
 
 ## Commands
 
 ```bash
-cargo build                 # compile
-cargo check                 # fast type-check (use after every edit)
-cargo clippy                # lints
-cargo test                  # unit tests (profiles, characters, workflow, DB, media sniffing, backoff, fades)
-cargo test -- --ignored     # real FFmpeg render test on generated assets (needs ffmpeg, no API calls)
-cargo run                   # start the scheduler loop (runs forever, calls paid APIs)
-STUDIO_PROFILE=<id> cargo run  # pick a profile from src/profiles.rs (default: kids_edu)
-APP_DEBUG=True cargo run    # debug: auto-revive sessions that hit max_retry instead of waiting
+cargo build                  # compile
+cargo check                  # fast type-check (use after every edit)
+cargo clippy                 # lints
+cargo test                   # unit tests
+cargo test -- --ignored      # real FFmpeg render on generated assets (no API calls)
+STUDIO_PROFILE=<id> cargo run   # scheduler + agents, runs forever
 ```
 
-- Requires `ffmpeg` and `ffprobe` on PATH, and a `.env` copied from `.env.example`.
-- Uses `Duration::from_mins`, so it needs a recent stable Rust (1.91+).
-- Tests live next to the code (`#[cfg(test)]` modules in `profiles.rs`, `characters.rs`, `workflow.rs`, `db.rs`, `helper.rs`, `renderer.rs`). Verify with `cargo check` and `cargo test`; run `cargo test -- --ignored` after touching FFmpeg code. Don't `cargo run` without asking: it spends API credits and can upload to YouTube/TikTok.
+- Do not `cargo run` without asking: it calls paid APIs, may open an OAuth browser flow on :8080 and uploads videos publicly to YouTube.
+- Requires `ffmpeg` and `ffprobe` on PATH and a `.env` copied from `.env.example`.
+- Speech: local Piper in `tools/` (gitignored) if present, otherwise ElevenLabs (`ELEVEN_LABS_KEY_n`).
+- No minimum Rust version is pinned; use a recent stable toolchain.
+- Verify with `cargo check` and `cargo test`.
 
 ## Code map
 
-| Pipeline agent | Where it lives |
+| Concern | Where |
 |---|---|
-| Scheduler (outer loop, retry/backoff, session resume) | `src/scheduler.rs` |
-| Planner / Writer / Builder / Renderer / Publisher (state machine) | `src/workflow.rs` → `run_agent_workflow`, one `match` arm per `AgentNode` |
-| LLM, image, TTS provider selection + FFmpeg rendering | `src/renderer.rs` (`build_content`, `generate_scene_visual`, `generate_scene_audio`, `ffmpeg_render`) |
-| Uploads | `src/uploader.rs` |
-| Provider HTTP clients | `src/api/*.rs` (one file per provider, registered in `src/api/mod.rs`) |
-| Studio profiles (video types, selection) | `src/profiles.rs` (`StudioProfile`, `PROFILES`, `active_profile`, `cast()`) |
-| Characters: `Character` struct, loader, validation | `src/characters.rs` (`init`, `cast_for`) |
-| Character data, one TOML per character | `data/characters/<profile_id>/*.toml` (reference: `data/characters/README.md`) |
-| State, artifact schema | `src/models.rs` (`VideoState`, `VideoArtifact`, `Scene`, `VideoTimeline`) |
-| Enums (`AgentNode`, `Motion`, `Transition`, `VoiceMode`) | `src/enums.rs` |
-| Static config (output video size/fps, base voice, TTS, feature flags) | `src/config.rs` → `CONFIG` |
-| Persistence (SQLite `data_history.db`) | `src/db.rs` |
+| Startup, `AppState`, provider and uploader registration | `src/main.rs` |
+| Engine: scheduler task + dispatch loop + pool sizes | `src/workflow.rs` (`WorkflowEngine`) |
+| `Agent` trait, `AgentType`, `AgentPool` (retry/fail), `AgentError`, `job_profile` | `src/agent.rs` |
+| Agents | `src/agents/{manager,planner,writer,builder,renderer,publisher,cleaner}.rs` |
+| Payloads, `Motion`, `Transition`, `Position`, `Storyboard::from_llm_json`, `Shot::image_prompt` | `src/entities/movie.rs` |
+| Profiles (`StudioProfile`, `PROFILES`) | `src/entities/profile.rs` |
+| Characters (TOML loading, validation, `describe`) | `src/entities/character.rs`, data in `data/characters/` |
+| Queue, workflows, topics, OAuth tokens | `src/db.rs`, `migrations/schema_01.sql` |
+| `Job`, `Workflow`, statuses, `OAuthToken` | `src/models/` |
+| Provider manager (keys, round-robin, limits) | `src/provider.rs` |
+| Provider clients | `src/providers/{gemini,cf_worker,eleven_labs}.rs` |
+| Uploaders and manager | `src/uploader.rs`, `src/uploaders/{youtube,tiktok}.rs` |
+| YouTube OAuth (callback server on :8080, refresh) | `src/oauth.rs` |
+| Static settings (`video`, `workflow_per_day`, `diffusion`, `tts`, `voice`) | `src/config.rs` |
+| Atomic writes, `is_image`, `truncate_chars` | `src/helper.rs` |
 
-## Current provider wiring
+## Provider wiring
 
-- Script LLM: `gemini::generate_script` (gemini-2.5-flash), called via `renderer::build_content`
-- Image: `cloudflare::generate_image` (flux-1-schnell), called via `renderer::generate_scene_visual`
-- TTS: `elevenlabs::generate_tts`, called via `renderer::generate_scene_audio`. Max 2 concurrent requests (semaphore, ElevenLabs free tier)
-- Unused but present: `fal`, `hugging_face`, `pollinations`, `microsoft_edge`, `googleapis`
+- Script LLM: Gemini `gemini-2.5-flash` (`Provider::Gemini`), used by Planner and Writer.
+- Image: Cloudflare Workers AI `flux-1-schnell` (`Provider::CFWorker`), used by Builder.
+- Speech: Builder checks at runtime for `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx`. Both present: local Piper. Otherwise: ElevenLabs (`Provider::ElevenLabs`, concurrency 2). `voice_id` applies in ElevenLabs mode only.
+- Registered in `AppState::build`: Gemini (2), CFWorker (10), ElevenLabs (2). Uploaders: YouTube only; `TiktokUploader` exists but is not registered.
 
-Swapping a provider means changing one call in `src/renderer.rs`. Workflow code never calls `api::*` directly. Keep it that way.
+Agents never call HTTP APIs directly. They use `state.services.providers.acquire(&Provider::X)` then `guard.call(request)`. Keep it that way.
 
-## State & resume semantics
+## State and resume semantics
 
-- `VideoState` is serialized as JSON into `workflow_state` after each node (`db.save_state(&state.reset())`). On restart the scheduler resumes the most recent unfinished session for `APP_VERSION`.
-- Bump `APP_VERSION` in `src/db.rs` when changing `VideoState` or artifact fields in an incompatible way. Otherwise old rows fail to deserialize and get silently ignored.
-- Not deployed yet: there is no legacy data to stay compatible with. Still bump `APP_VERSION` on incompatible `VideoState` changes so local in-flight sessions are ignored instead of failing to load.
-- A session keeps the profile it started with; a changed `STUDIO_PROFILE` only affects the next new session.
-- Topic dedup lives in `topic_history (id, profile, topic, created_at)`: last 20 topics per profile, saved only after a successful End.
-- Assets are idempotent: the Builder skips existing `images/` and `audios/` files, and the Renderer skips existing `videos/scene_N.mp4` and `final_video.mp4`. Delete them to force regeneration.
-- Output path: `./output/{YYYYMMDD}_{profile_id}/{session_id}/{images,audios,videos}/scene_N.*` plus `final_video.mp4`. Frame size and fps come from `CONFIG.video` (1080x1920, 25 fps).
-- Asset and render outputs are written to `<path>.part` and renamed (`helper::write_atomic`), so a crash never leaves a truncated file that the skip-if-exists logic would reuse.
+- State is the `jobs` and `workflows` tables in `data_history.db`. A job payload is the JSON of the previous agent's output; handoff is `db.handoff_job`.
+- Failure: `AgentPool` calls `retry_job` (backoff via `jobs.run_after`, 60 s doubling to 1 h, `db::retry_delay_secs`) while `agent::should_retry` allows it (`max_retry` = 3 total attempts), then `fail_job` (job and workflow `failed`).
+- Startup: `recover_interrupted_jobs` requeues jobs left `processing`.
+- The Cleaner marks the workflow `completed`.
+- `APP_VERSION` (`src/db.rs`) filters which jobs are claimed and counted busy. Bump it after an incompatible payload change so old jobs are ignored.
+- The schema (`migrations/schema_01.sql`) is applied only when the DB file is created. The project is not deployed, so change the schema by editing `schema_01.sql` and deleting your local `data_history.db`.
+- New fields on payload structs should be `Option<T>` or `#[serde(default)]` so queued jobs still decode.
+- Assets are idempotent: Builder skips existing `shot_N/image.png` and `audio.wav`; Renderer skips existing `shot_N/video.mp4` and `final_video.mp4`. Delete them to force regeneration.
+- Output path: `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`, dated by the workflow's creation, local time). The Cleaner deletes intermediates after publishing unless `cleanup.keep_intermediates`.
+- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per workflow) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`).
 
 ## Conventions
 
-- Fallible functions return `Result<T, String>` (provider/workflow) or `anyhow::Result` (db). Prefix errors with `helper::ctx(node, err)`.
-- Each `src/api/*.rs` reads its own env var and returns `Err("Missing X")` if it isn't set. Add new keys to `.env.example`.
-- Validate provider bytes with `helper::expect_media(bytes, MediaType::X, "what")` before writing. Parse provider HTTP responses with `api::read_json` / `api::read_bytes` (status check, body in the error) and map transport errors with `api::send_err` (strips the URL). Never put API keys in URLs.
-- LLM-facing enums (`Motion`, `Transition`) need matching `ALL`, `Display` and `FromStr` entries. The Writer prompt is built from `ALL`.
-- Logs use emoji-prefixed `println!` per node (`🧠[Planner]`, `✍️ [Writer]`, …). Match that style.
-- Never `unwrap()` LLM output. Use the `json_str` / `json_str_array` helpers in `workflow.rs` and validate character names against `profile.character()`.
-- Characters are data: never hardcode a cast in Rust; add a TOML file under `data/characters/<profile_id>/` (loaded at startup, no rebuild; see `data/characters/README.md`).
-- Never hardcode audience, format, language or publish metadata in workflow/uploader code. Put it in the profile.
-- Profile ids are persisted (output folders, `topic_history`, saved sessions): don't rename them.
-- Every workflow arm ends with `db.save_state(&state.reset())` after moving `current_node` forward.
+- Errors: agents return `AgentError` (`Decode`, `Encode`, `Execute`, `Handoff`); internal helpers return `Result<T, String>`; providers return `ProviderError`. Never panic on external data.
+- Parse LLM output leniently and never `unwrap()` it. Unknown enum values fall back (see `Storyboard::from_llm_json`).
+- Validate character names with `profile.character(name)` (full name or nickname). Store full names.
+- Never hardcode audience, format, language, visual style or publish data. Read them from the profile (`job_profile`). Characters are data files in `data/characters/`, never Rust.
+- Profile ids are persisted in `workflows.profile` and used as folder names: do not rename them.
+- Never log secrets or put keys in URLs (Gemini uses a header). Use `e.without_url()` on reqwest errors.
+- Write generated files atomically with `helper::write_atomic`, or `helper::part_path` plus `helper::commit_part`.
+- Check provider bytes before saving (`helper::is_image`).
+- Logs are emoji-prefixed `println!` per agent (`🧠 [Planner]`, `✍️  [Writer]`, `🔧 [Builder]`, `🎥 [Renderer]`, `📤 [Publisher]`, `📤 [Cleaner]`). Match that.
+- LLM-facing enums (`Motion`, `Transition`, `Position`) need an `ALL` entry, `strum` lowercase `Display`/`FromStr`, and serde lowercase. The Writer prompt is built from `ALL`.
+- Do not run real uploads or `cargo run` unless the user asks.
 
 ## Skills
 
-Project skills in `.claude/skills/`, one per agent plus cross-cutting tasks:
-`planner-agent`, `writer-agent`, `builder-agent`, `renderer-agent`, `uploader-agent`, `add-profile`, `add-provider`, `debug-session`.
+Project skills in `.claude/skills/`: `planner-agent`, `writer-agent`, `builder-agent`, `renderer-agent`, `publisher-agent`, `add-profile`, `add-provider`, `debug-workflow`.

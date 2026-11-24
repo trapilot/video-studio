@@ -1,37 +1,28 @@
 ---
 name: writer-agent
-description: Work on the Writer stage — the LLM prompt that produces the VideoArtifact script (title, scenes, motion, transition, visual_prompt, voice_segments). Use when changing script structure, prompt rules, scene schema, or voice assignment.
+description: Work on the Writer agent (src/agents/writer.rs) and the Storyboard types: prompt rules, Motion/Transition/Position enums, lenient LLM JSON parsing, image prompts. Use when changing the script prompt, shot schema or enums.
 ---
 
-# Writer Agent
+# Writer agent
 
-**Code:** `AgentNode::Writer` arm in `src/workflow.rs`. Schema in `src/models.rs` (`VideoArtifact`, `Scene`, `VoiceSegment`).
+**Code**: `src/agents/writer.rs`; types and parsing in `src/entities/movie.rs`. **Pool**: 2.
 
 ## Contract
-- Input: `target_topic`, the character selection, and the profile (`state.profile()`): name, format, audience, tone, visual style, duration, scene count, language, `content_rules`, and the cast from `data/characters/` (`profile.cast()`).
-- Output: `state.final_json = Some(VideoArtifact)`, then moves to `AgentNode::Builder` and saves state.
-- After parsing, each `voice_segment.voice_id` is filled from the speaker's `Character.voice_id` (looked up with `profile.character()`), or `CONFIG.voice.base_voice` for the narrator and unknown speakers.
+- Input: `StoryContext`. Output (handoff to Builder): `Storyboard { title, shots: [Shot] }`.
+- Shot: `shot_id`, `visual_prompt`, `motion`, `transition`, `actors[]` (character, position, action, emotion), `dialogues[]` (character, text), `environment`, `camera`.
 
-## Output validation
-After parsing, `normalize_artifact` (in `workflow.rs`) rejects scripts with no scenes, empty voice-over or empty visual prompts (that's an `Err`, so the scheduler retries), renumbers scenes 1..n (ids become file names), and replaces unknown motion/transition names with `None` / `Transition::DEFAULT`. Extend it when you add fields that later stages depend on.
+## How it works
+- With a cast, the prompt contains `Character::describe()` of each chosen character (every non-empty field plus Appearance from `visual_template`). Without a cast it requires the speaker `"Narrator"` (`NARRATOR`).
+- Numbered rules = generic rules (language, `duration_secs`, `shot_count`, one idea per shot, text-free visuals, 9:16 framing) + cast rules + `profile.content_rules`.
+- Allowed motions, transitions and positions are printed from `Motion::ALL`, `Transition::ALL`, `Position::ALL`.
+- `Storyboard::from_llm_json` parses leniently: case/`_`/`-`/space-insensitive enum matching, fallbacks (`none`, `fade`, `center`), drops empty dialogue and dialogue-less shots, sorts and renumbers shots 1..n.
+- `Shot::image_prompt(profile)`: `visual_style`, `visual_prompt`, each actor's `visual_anchor()`, setting, camera, "vertical 9:16 ... no text". Capped at 2000 characters.
 
-## Schema changes
-Changing `Scene`/`VideoArtifact` means updating **three** places together:
-1. The struct in `src/models.rs`.
-2. The `Return STRICT JSON:` example in the Writer system prompt.
-3. Consumers: `build_timelines` / `ffmpeg_render` in `src/renderer.rs`.
-If the change is incompatible, also bump `APP_VERSION` in `src/db.rs`.
+## Gotchas
+- Adding a `Motion`/`Transition`/`Position` variant needs: enum variant, entry in `ALL`, lowercase `Display`/`FromStr` (strum), and for motion a `zoompan` filter in `ffmpeg_filter`, for transition an `ffmpeg_name` (valid FFmpeg xfade name).
+- Do not tell the LLM names the enums cannot parse.
+- Keep guidelines generic: no show- or character-specific text in the prompt.
+- New `Shot` fields: `#[serde(default)]`.
 
-## Motion / Transition
-- The allowed values come from `Motion::ALL` / `Transition::ALL` in `src/enums.rs`. The prompt is generated from those lists, so adding an enum variant (with `Display`, `FromStr`, and the ffmpeg mapping) is enough. Don't hardcode names in the prompt.
-- Update the "Motion guidelines" / "Transition guidelines" text if a new variant needs a usage hint.
-
-## Prompt rules to preserve
-- The prompt is generated from the profile. Nothing about audience, length or language is hardcoded.
-- Visual style: the main character's `visual_anchor` with a cast (empty anchor falls back to `profile.visual_style`), else `profile.visual_style`.
-- With a cast, speakers are the cast. `describe_characters` in `workflow.rs` gives the LLM every non-empty field of each chosen character (nickname, age, role, family role, story function, profession, personality, speaking style, catchphrase, strengths, weaknesses, core values, relations), so a new field in `Character` must be added to its list to reach the prompt. Without one, every segment uses `"Narrator"` (`profiles::NARRATOR`).
-- Rules are numbered in this order: generic rules (language, duration range, scene range, at least one voice_segment per scene, still-image visual prompts, no invented motion/transition names), then cast rules, then `profile.content_rules`.
-- Kid-specific rules (dialogue in every scene, kid-friendly visuals, English only) live in the `kids_edu` profile's `content_rules`, not in the Writer code.
-- Output is parsed with `responseMimeType: application/json` (`build_content(..., true)`), so keep the prompt asking for JSON only.
-
-Verify with `cargo check`.
+## Verify
+`cargo check`, `cargo test` (`storyboard_parsing_is_lenient_and_safe`, `image_prompt_uses_style_shot_and_character_look`). No real Gemini calls without the user's OK.

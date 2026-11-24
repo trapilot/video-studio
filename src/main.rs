@@ -1,44 +1,114 @@
 mod db;
-mod api;
-mod enums;
+mod agent;
+mod oauth;
 mod config;
-mod models;
-mod characters;
-mod profiles;
-mod helper;
-mod workflow;
-mod renderer;
+mod provider;
 mod uploader;
-mod scheduler;
+mod workflow;
+mod helper;
+
+mod agents;
+mod models;
+mod entities;
+mod providers;
+mod uploaders;
 
 use std::sync::Arc;
-use crate::db::DbManager;
 
+
+#[derive(Clone)]
+pub struct AppState {
+    pub services: Arc<Services>,
+    pub config: Arc<config::Config>,
+    /// Profile for new workflows (`STUDIO_PROFILE`). Running workflows use their own.
+    pub profile: &'static entities::StudioProfile,
+}
+
+pub struct Services {
+    pub db: Arc<db::DbManager>,
+    pub providers: Arc<provider::ProviderManager>,
+    pub uploaders: Arc<uploader::UploaderManager>,
+}
+
+impl AppState {
+    pub async fn build(profile: &'static entities::StudioProfile) -> Result<Self, Box<dyn std::error::Error>> {
+        let db = Arc::new(db::DbManager::new("data_history.db").await?);
+
+        let providers = Arc::new(provider::ProviderManager::new());
+        providers.register_with_keys(
+            Arc::new(providers::GeminiClient),
+            2,
+            "GEMINI",
+        ).await;
+        providers.register_with_keys(
+            Arc::new(providers::CFWorkerClient),
+            10,
+            "CF_WORKER",
+        ).await;
+        providers.register_with_keys(
+            Arc::new(providers::ElevenLabsClient),
+            2,
+            "ELEVEN_LABS",
+        ).await;
+
+
+        let uploaders = Arc::new(uploader::UploaderManager::new());
+        uploaders.register(
+            Arc::new(uploaders::YoutubeUploader::new())
+        ).await;
+
+        let services = Arc::new(Services {
+            db,
+            providers,
+            uploaders,
+        });
+
+        Ok(Self {
+            services,
+            config: Arc::new(config::build_config()),
+            profile,
+        })
+    }
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {   
+    dotenvy::dotenv().ok(); 
+    let data_dir = std::env::var("STUDIO_DATA_DIR")
+        .unwrap_or_else(|_| entities::character::DEFAULT_DATA_DIR.to_string());
+    entities::character::init(&data_dir)?;
+    let profile = entities::active_profile()?;
 
-    let data_dir = std::env::var("STUDIO_DATA_DIR").unwrap_or_else(|_| characters::DEFAULT_DATA_DIR.to_string());
-    characters::init(&data_dir)?;
-    let profile = profiles::active_profile()?;
-
-    let client = reqwest::Client::new();
-    let db = Arc::new(DbManager::new("data_history.db")?);
-
+    let cast = profile.enabled_cast().map(|c| c.name.as_str()).collect::<Vec<_>>();
     println!(
         "🚀 Video Studio v{} | profile: {} ({}) | cast: {}",
         env!("CARGO_PKG_VERSION"),
         profile.id,
         profile.name,
-        if profile.has_cast() {
-            profile.cast().iter().filter(|c| c.enabled).map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
-        } else {
-            "narrator only".to_string()
-        },
+        if cast.is_empty() { "narrator only".to_string() } else { cast.join(", ") },
     );
-    
-    scheduler::run_scheduler(client, db, profile).await;
 
+    let state = Arc::new(AppState::build(profile).await?);
+
+    match oauth::seed_from_env(&state.services.db).await {
+        Ok(true) => println!("🔑 YouTube: using YOUTUBE_REFRESH_TOKEN from the environment"),
+        Ok(false) => {}
+        Err(e) => eprintln!("🔴 YouTube: {}", e),
+    }
+
+    if !oauth::has_auth_token(&state.services.db).await {
+        oauth::start_oauth_server(&state.services.db).await;
+    }
+
+    let recovered = state.services.db.recover_interrupted_jobs().await?;
+    if recovered > 0 {
+        println!("🔁 Requeued {} job(s) interrupted by the last shutdown", recovered);
+    }
+
+
+    let workflow = workflow::WorkflowEngine::new(state);
+
+    workflow.start().await;
+    
     Ok(())
 }

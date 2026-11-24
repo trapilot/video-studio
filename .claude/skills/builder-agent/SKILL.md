@@ -1,32 +1,28 @@
 ---
 name: builder-agent
-description: Work on the Builder stage — generating per-scene images and TTS audio and producing VideoTimeline entries. Use when changing image/voice generation, concurrency, voice mode, or asset paths.
+description: Work on the Builder agent (src/agents/builder.rs): per-shot image and speech generation (Cloudflare, Piper or ElevenLabs), asset layout, timeline and subtitle timing. Use when changing assets, TTS or timing.
 ---
 
-# Builder Agent
+# Builder agent
 
-**Code:** `AgentNode::Builder` arm in `src/workflow.rs` calls `build_timelines` in `src/renderer.rs`, which uses `generate_scene_visual` and `generate_scene_audio`.
+**Code**: `src/agents/builder.rs`. **Pool**: 1 (shots inside a workflow run concurrently).
 
 ## Contract
-- Input: `state.final_json.scenes`, `state.target_path`, `VoiceMode`.
-- Output: writes `{target_path}/images/scene_N.png` and `{target_path}/audios/scene_N.mp3`, sets `state.video_timelines`, then moves to `Renderer`.
-- Scene duration comes from the **audio length** (`ffprobe`), not from `scene.duration` in the script.
+- Input: `Storyboard`. Output (handoff to Renderer): `Timeline { title, final_path, video_path, subtitle_path, clips: [Clip] }`.
+- Assets: `{db.workflow_output_path}/shot_N/{image.png, audio.wav, video.mp4}` (`ShotAssets`). `video.mp4` is produced later by the Renderer.
 
-## Providers
-- Image: `cloudflare::generate_image` (change it in `generate_scene_visual`).
-- TTS: `elevenlabs::generate_tts` (change it in `generate_scene_audio`).
-- To swap or add a provider, see the `add-provider` skill. Don't call `api::*` from `workflow.rs`.
-
-## Voice modes (`enums::VoiceMode`)
-- `SingleVoice` (current default): joins all segment texts and voices them with the first segment's `voice_id`.
-- `PerSegment`: one TTS call per segment, saved as `scene_N.mp3.tmp_i`, then concatenated with `ffmpeg -f concat`.
+## How it works
+- Image: `shot.image_prompt(profile)` -> `Provider::CFWorker` (flux-1-schnell, `config.diffusion`, fixed seed per workflow via `stable_seed` so any account/key gives the same image) -> `helper::is_image` check -> `helper::write_atomic`.
+- Speech: at runtime the Builder checks `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx`. If both exist and the profile's language is English it runs Piper per dialogue line. Otherwise it logs why and uses ElevenLabs via the provider manager (voice = speaker's `voice_id`, else `config.voice.base_voice`; `config.tts` settings). Both give the same WAV format; segments are concatenated with `hound` into `audio.wav.part`, then renamed.
+- Duration from `ffprobe`. Each clip lasts `speech + Transition::DURATION` (2 s); speech starts at half of it; clips overlap by `Transition::fade_between(prev, cur)`. `start_time`/`end_time` are subtitle times in the final video.
+- Existing `image.png` and `audio.wav` are skipped (idempotent retries).
 
 ## Gotchas
-- Scenes run concurrently, but a shared `Semaphore::new(2)` caps concurrency at 2 (ElevenLabs free tier). It covers both image and audio work.
-- Always check returned bytes with `expect_media(bytes, MediaType::Image|Audio, ..)`. Providers sometimes return HTML/JSON errors with a 200 status.
-- Write assets with `write_atomic` (`.part` then rename), so an interrupted run never leaves a truncated file that would be skipped as "already exists".
-- `PerSegment` writes `scene_N.mp3.seg_i.mp3`, concatenates them via a list file with bare file names (ffmpeg resolves list entries relative to the list), then deletes the parts.
-- Assets that already exist on disk are skipped, so retries only generate what's missing. Delete a file to force it to regenerate (for example after changing a prompt).
-- The arm saves state after it finishes, so a resume starts at the Renderer.
+- The overlap must match the Renderer's `xfade`/`acrossfade` offsets: both use `Transition::fade_between`. Change it in one place.
+- Write files atomically; never leave a truncated asset that a retry would skip.
+- Propagate errors; never ignore a failed image or audio.
+- Images are square; the Renderer center-crops them to 9:16.
+- Piper is gitignored under `tools/`: tell users to install it or set `ELEVEN_LABS_KEY_1`.
 
-Verify with `cargo check`.
+## Verify
+`cargo check`, `cargo test`. Real image/TTS calls spend quota: ask the user first.

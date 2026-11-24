@@ -1,114 +1,134 @@
 # Video Studio
 
-Video Studio is an autonomous studio that produces short-form vertical video, any kind you define, and publishes it to YouTube Shorts and TikTok. Kids stories, explainers, product promos, motivational clips and news recaps are all the same pipeline with a different **studio profile**.
+Video Studio is an autonomous studio that produces short vertical videos of any kind you define and publishes them to YouTube Shorts. Kids stories, explainers and product promos all run through the same pipeline. Only the **studio profile** changes.
 
-It runs as a loop: pick a topic, write a script, generate images and voice-over, render the video with FFmpeg, upload it, wait, repeat. Progress is saved to SQLite after every stage, so a crash or API failure resumes where it stopped.
+It runs as a job queue. A scheduler creates a workflow, and a chain of agents (Planner, Writer, Builder, Renderer, Publisher, Cleaner) each pick up one job, do one piece of work and hand the result to the next agent. Everything is stored in SQLite, so a crash or an API failure resumes where it stopped.
+
+> **Warning.** Running the studio calls paid or quota-limited APIs (Gemini, Cloudflare Workers AI) and **uploads videos publicly** to YouTube. Read [Quick start](#quick-start) before the first run.
 
 ---
 
 ## How it works
 
 ```text
-Planner -> Writer -> Builder -> Renderer -> Publisher -> End
+                         ┌────────────────────────────────────────────────┐
+                         │                WorkflowEngine                  │
+                         │                                                │
+ scheduler task ─────────┼─► workflows + first job  ──┐                   │
+ (every 30 s, up to      │                            ▼                   │
+  workflow_per_day)      │              ┌──────────────────────┐          │
+                         │              │  jobs table (SQLite) │◄───┐     │
+                         │              └──────────┬───────────┘    │     │
+                         │       dispatch loop:    │ claim_job()    │     │
+                         │                         ▼                │     │
+                         │   ┌─────────┐ ┌────────┐ ┌─────────┐     │     │
+                         │   │ Planner │ │ Writer │ │ Builder │ ... │     │
+                         │   │  (x10)  │ │  (x2)  │ │  (x1)   │     │     │
+                         │   └────┬────┘ └───┬────┘ └────┬────┘     │     │
+                         │        └──────────┴───────────┴── handoff_job() │
+                         └────────────────────────────────────────────────┘
+
+Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
+           StoryContext  Storyboard  Timeline  VideoMetadata  UploaderState
 ```
 
-Each stage is one `match` arm of `run_agent_workflow` in `src/workflow.rs`. Stages talk to each other only through the shared `VideoState` (`src/models.rs`), which is saved to the database after every stage. The pipeline does not know what kind of video it makes; that comes from the active profile.
+- **Scheduler** (`WorkflowEngine::start_scheduler`, `src/workflow.rs`): every 30 seconds, if no Planner job is pending or processing and fewer than `config.workflow_per_day` workflows were created today (local day), it creates a workflow for the active profile and its first job.
+- **Dispatch loop** (`WorkflowEngine::dispatch`): claims the oldest runnable job with `db.claim_job()` and runs it in the agent's `AgentPool`. If the pool is full, the job is released with its retry count untouched.
+- **Agent pools** (concurrency per agent): Planner 10, Writer 2, Builder 1, Renderer 1, Publisher 2, Cleaner 1, Manager 1.
+- **Handoff**: an agent finishes by calling `db.handoff_job(job, next_agent, payload)`. That creates the next job with a JSON payload and marks the current job completed. Agents never call each other.
 
-**Planner** (`AgentNode::Planner`, `src/workflow.rs`)
-Asks the script LLM for one topic that fits the profile's format, audience and tone, avoiding the last 20 topics saved for this profile (`db.get_recent_topics`). If the profile has a cast, it also picks a main character, spotlight characters and supporting characters, and every name is validated against the cast (a hallucinated name fails the stage and triggers a retry). If the profile has no cast, the character fields are forced empty. Output: `target_topic` and the character fields on `VideoState`.
+### The agents
 
-**Writer** (`AgentNode::Writer`, `src/workflow.rs`)
-Builds a system prompt from the profile (format, audience, tone, visual style, cast, rules) and asks the LLM for a strict JSON `VideoArtifact`: a title and a list of scenes, each with `duration`, `motion`, `transition`, a `visual_prompt` (one still image) and `voice_segments` (speaker and text). Each segment then gets a `voice_id`: the cast member's voice, or `CONFIG.voice.base_voice` for the narrator and unknown speakers. Output: `final_json`.
+| Agent | Input payload | What it does | Output payload | File |
+|---|---|---|---|---|
+| Manager | none | Placeholder. The scheduler creates the workflow and a job already addressed to the Planner (parent `manager`), so the Manager agent never receives a job today. | none | `src/agents/manager.rs` |
+| Planner | any (ignored; the profile comes from the workflow) | Asks Gemini for one topic that fits the profile, avoiding the last 30 days of topics of the same profile. With a cast it also picks the main, spotlight and supporting characters and validates every name. Saves the topic on the workflow. | `StoryContext` | `src/agents/planner.rs` |
+| Writer | `StoryContext` | Builds a prompt from the profile (format, audience, tone, visual style, rules, cast) and asks Gemini for a strict JSON storyboard. Parses it leniently. | `Storyboard` | `src/agents/writer.rs` |
+| Builder | `Storyboard` | For every shot: generates an image (Cloudflare `flux-1-schnell`) and speech (local Piper, or ElevenLabs when Piper is not installed), measures the audio with `ffprobe` and computes clip and subtitle timing. | `Timeline` | `src/agents/builder.rs` |
+| Renderer | `Timeline` | Renders one clip per shot, joins them with `xfade`/`acrossfade`, burns in ASS subtitles. | `VideoMetadata` | `src/agents/renderer.rs` |
+| Publisher | `VideoMetadata` | Uploads `final_video.mp4` to every registered uploader (YouTube today) using the profile's publish data. | `UploaderState` | `src/agents/publisher.rs` |
+| Cleaner | `UploaderState` | Logs upload errors, deletes the per-shot files and the un-subtitled `video.mp4` (unless `cleanup.keep_intermediates`), completes its job and marks the workflow `completed`. | none | `src/agents/cleaner.rs` |
 
-**Builder** (`AgentNode::Builder`, `build_timelines` in `src/renderer.rs`)
-For every scene, generates an image (Cloudflare `flux-1-schnell`) and a voice-over (ElevenLabs), at most 2 requests at a time. Existing files are skipped, so a retry only generates what is missing. Scene length is measured from the audio with `ffprobe`. Output: `images/scene_N.png`, `audios/scene_N.mp3` and `video_timelines` on the state.
-
-**Renderer** (`AgentNode::Renderer`, `ffmpeg_render` in `src/renderer.rs`)
-Turns each image and audio file into a clip with a camera-motion filter (`zoompan` based, see `Motion` in `src/enums.rs`), joins the clips with `xfade` transitions (see `Transition`) and writes the final file. Existing `videos/scene_N.mp4` and `final_video.mp4` are skipped. Output: `video_path`.
-
-**Publisher** (`AgentNode::Publisher`, `src/uploader.rs`)
-Uploads `final_video.mp4` to YouTube and TikTok concurrently. The title is the script's `title` (falling back to the topic), trimmed to YouTube's 100-character limit. YouTube description, tags, category and the made-for-kids flag come from `profile.publish`. Only a YouTube failure fails the stage; a TikTok failure is logged. A platform that already succeeded is skipped on retry, so nothing is posted twice.
-
-**End**
-Returns the artifact. The scheduler (`src/scheduler.rs`) marks the session `done` and saves the topic to `topic_history` for this profile, then sleeps 10 minutes.
-
-See [AGENTS.md](AGENTS.md) for the full contract of each stage.
+Payload types live in `src/entities/movie.rs` (`StoryContext`, `Storyboard`, `Timeline`, `VideoMetadata`) and `src/uploader.rs` (`UploaderState`). See [AGENTS.md](AGENTS.md) for JSON examples and the full contract of each agent.
 
 ---
 
 ## Studio profiles
 
-A `StudioProfile` (`src/profiles.rs`) describes one kind of video: what it is, who it is for, how it looks and sounds, how long it is, which rules apply, who appears in it, and how it is published. Profiles are static Rust data in the `PROFILES` array. The recurring cast is not part of the profile struct: it is loaded from data files (see "Characters are data" below).
+A `StudioProfile` (`src/entities/profile.rs`) describes one kind of video: what it is, who it is for, how it looks and sounds, how long it is, which rules apply and how it is published. Profiles are static Rust data in the `PROFILES` array. The recurring cast is not part of the struct. It is loaded from data files (see [Characters](#characters)).
 
 ### Fields
 
-| Field | Meaning |
-|---|---|
-| `id` | Stable slug (`kids_edu`). Used in `STUDIO_PROFILE`, output folder names and topic dedup. Lowercase letters, digits and `_` only. Never rename it after producing videos. |
-| `name` | Human-readable show or channel name. Shown in the startup log and given to the LLM. |
-| `format` | What the video is, as a phrase that completes "producing ...". |
-| `audience` | Who watches it. |
-| `tone` | Voice and mood. |
-| `topic_brief` | What the Planner should come up with each run ("Create {topic_brief}"). |
-| `language` | Language for every spoken and written word. |
-| `visual_style` | Image style for every scene when there is no cast. With a cast, the main character's `visual_anchor` is used instead. |
-| `duration_secs` | `(min, max)` target length in seconds, given to the Writer. |
-| `scene_count` | `(min, max)` number of scenes. |
-| `content_rules` | Extra rules appended to the Writer prompt (safety, brand, factual constraints). |
-| `publish` | `PublishProfile`: `description`, `tags`, `youtube_category`, `made_for_kids`. |
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | `&str` | Stable slug (`kids_edu`). Used in `STUDIO_PROFILE`, `data/characters/<id>/` and topic dedup. Lowercase letters, digits and `_` only (checked by a test). Never rename it after producing videos. |
+| `name` | `&str` | Human-readable show or channel name. Shown in the startup log and given to the LLM. |
+| `format` | `&str` | What the video is, as a phrase that completes "producing ...". Also used as the workflow task text. |
+| `audience` | `&str` | Who watches it. |
+| `tone` | `&str` | Voice and mood. |
+| `topic_brief` | `&str` | What the Planner comes up with each run ("Create {topic_brief}"). |
+| `language` | `&str` | Language for all spoken and written content. |
+| `visual_style` | `&str` | Art style placed first in every image prompt, so all shots look consistent. |
+| `duration_secs` | `(u16, u16)` | Target total length in seconds (min, max), given to the Writer. |
+| `shot_count` | `(u8, u8)` | Number of shots (min, max), given to the Writer. |
+| `content_rules` | `&[&str]` | Extra rules appended to the Writer prompt (safety, brand, factual constraints). |
+| `publish` | `PublishProfile` | `description`, `tags`, `youtube_category`, `made_for_kids`. |
 
 ### Built-in profiles
 
 | id | Name | Format | Cast | YouTube category | Made for kids |
 |---|---|---|---|---|---|
-| `kids_edu` (default) | Bin's Family Adventures | Animated educational story for children aged 4-8, told by a family cast | `data/characters/kids_edu/` (4 files: Bin, Hoang Yen, Nam, Diem Suong) | 27 Education | yes |
-| `explainer` | Quick Explainers | Narrated explainer, one idea in under a minute, for curious adults and teenagers | none (narrator-only) | 28 Science & Technology | no |
+| `kids_edu` (default) | Bin's Family Adventures | Animated educational story for children aged 4-8, told by a family cast | `data/characters/kids_edu/` (4 files) | 27 (Education) | yes |
+| `explainer` | Quick Explainers | Narrated explainer of one idea in under a minute, for curious adults and teenagers | none (narrator-only) | 28 (Science & Technology) | no |
 
 ### Selecting a profile
-
-Set `STUDIO_PROFILE` in `.env` or the shell:
 
 ```bash
 STUDIO_PROFILE=explainer cargo run
 ```
 
-- Unset or empty: `kids_edu` (`DEFAULT_PROFILE_ID`).
-- Unknown id: the program exits at startup with an error that lists the known ids.
-- An unfinished session always resumes with the profile it started with (`VideoState.profile_id`), even if `STUDIO_PROFILE` has changed. The new value applies to the next new session.
+- Unset or empty: `kids_edu`.
+- Unknown id: startup stops with an error that lists the known ids.
+- `STUDIO_PROFILE` only decides the profile of **new** workflows. Each workflow stores its profile id in `workflows.profile`, and every agent reads it back with `agent::job_profile`, so in-flight work keeps the profile it started with.
 
 The startup banner shows what is active:
 
 ```text
-🚀 Video Studio v0.1.0 | profile: kids_edu (Bin's Family Adventures) | cast: Quốc Khánh, Hoàng Yến, Nam, Diễm Sương
 🚀 Video Studio v0.1.0 | profile: explainer (Quick Explainers) | cast: narrator only
 ```
 
-### Cast or narrator-only
+---
 
-| | With a cast | Narrator-only (no characters) |
-|---|---|---|
-| Planner returns | topic, main character, spotlight and supporting characters (validated with `profile.character()`) | topic only; character fields are forced empty |
-| Writer speakers | cast member names only | `"Narrator"` for every segment |
-| Voice | each character's `voice_id`; unknown speakers fall back to `CONFIG.voice.base_voice` | `CONFIG.voice.base_voice` |
-| Visual style | main character's `visual_anchor` | `profile.visual_style` |
-| Extra Writer rules | "Use only the provided characters as speakers", "The main character must drive the story" | "No on-screen dialogue between characters; narration only" |
+## Characters
 
-The Writer rules are numbered in this order: generic rules (language, duration, scene count, at least one voice segment per scene, still-image visual prompts, no invented motion or transition names), then the cast rules above, then the profile's `content_rules`.
+The cast is data, not code. One TOML file per character in `data/characters/<profile_id>/` (override the root with `STUDIO_DATA_DIR`). Files are loaded once at startup, so adding or editing a character needs a restart but no rebuild. Only `name` is required. Unknown fields, duplicate names or nicknames, a cast without a `spotlight = true` character and a folder that matches no profile id all stop startup with the file path and the reason. A profile without a folder, or without enabled characters, is narrator-only (the Writer uses the speaker `Narrator`).
+
+```toml
+# data/characters/study_buddies/01_mia.toml
+name = "Mia"
+nickname = "Mimi"
+spotlight = true
+birth_year = 2018
+personality_prompt = "A curious girl who asks why before every experiment."
+visual_template = "a 3D cartoon girl, age {age}, curly brown hair, green raincoat"
+```
+
+Full field reference, validation rules and where each field is used: [data/characters/README.md](data/characters/README.md).
 
 ---
 
 ## Create a new video type
 
-1. Open `src/profiles.rs`.
-2. Pick an `id`: a short lowercase slug such as `product_promo`. It becomes a folder name and a database key, so choose it once.
+1. Open `src/entities/profile.rs`.
+2. Pick an `id`: a short lowercase slug such as `product_promo`. It becomes a folder name and a database value, so choose it once.
 3. Write `format`, `audience`, `tone` and `topic_brief` as prompt-ready phrases. They are pasted into the LLM prompts as they are.
-4. Write a `visual_style` that works as a prefix for every image prompt: medium, lighting, composition, and "no text" if you don't want garbled lettering.
-5. Set `duration_secs` and `scene_count`. Keep them consistent (a 15 second video does not need 8 scenes).
-6. Add `content_rules`: short imperative sentences for the things that must always or never happen.
-7. Decide on a cast. For a cast, create `data/characters/<id>/` with one `.toml` file per character after step 9 (see [data/characters/README.md](data/characters/README.md)); for narrator-only, create nothing.
-8. Fill in `publish`. Set `made_for_kids: true` for anything aimed at children (COPPA).
-9. Append the profile to `PROFILES`, then run `cargo test` and `cargo check`.
-10. Try it with `STUDIO_PROFILE=<id> cargo run` (this spends API credits and publishes publicly, see Quick start).
+4. Write a `visual_style` that works as a prefix for every image prompt: medium, lighting, composition. Mention "no text" if you do not want garbled lettering (the image prompt already ends with "no text, no captions, no logos").
+5. Set `duration_secs` and `shot_count`. Keep them consistent: a Writer shot is about 3-5 seconds of speech.
+6. Add `content_rules`: short imperative sentences for what must always or never happen.
+7. Decide on a cast. For a cast, create `data/characters/<id>/` with one `.toml` file per character (at least one with `spotlight = true`). For narrator-only, create nothing.
+8. Fill in `publish`. Set `made_for_kids: true` for anything aimed at children.
+9. Append the profile to `PROFILES`, then run `cargo check` and `cargo test` (a test validates ids, durations and shot counts of every profile).
+10. Try it with `STUDIO_PROFILE=<id> cargo run`. This spends API credits and publishes publicly, see [Quick start](#quick-start).
 
 ### Example: a narrator-only profile
 
@@ -121,15 +141,14 @@ StudioProfile {
     tone: "energetic, upbeat, persuasive but honest",
     topic_brief: "a single everyday gadget or accessory and the one problem it solves",
     language: "English",
-    visual_style: "a clean studio product photograph, soft gradient background, dramatic lighting, vertical 9:16 composition, no text, no logos",
+    visual_style: "clean studio product photograph, soft gradient background, dramatic lighting",
     duration_secs: (25, 35),
-    scene_count: (4, 5),
+    shot_count: (6, 9),
     content_rules: &[
-        "Open with the problem in the first scene.",
-        "Name one concrete benefit per scene.",
+        "Open with the problem in the first shot.",
+        "Name one concrete benefit per shot.",
         "Do not invent prices, discounts or statistics.",
         "End with a short call to action.",
-        "Visual prompts must not contain written text or brand logos.",
     ],
     publish: PublishProfile {
         description: "A quick look at a handy gadget",
@@ -140,209 +159,209 @@ StudioProfile {
 },
 ```
 
-### Characters are data
-
-The cast is not written in Rust. Each character is one TOML file in `data/characters/<profile_id>/` (for example `data/characters/kids_edu/01_bin.toml`). To add a character, drop in a new file and restart; no rebuild is needed. Files load in file-name order, which is the cast order in prompts. Only `name` is required, and a misspelled field is a startup error.
-
-```toml
-# data/characters/study_buddies/01_mia.toml
-name = "Mia"
-spotlight = true          # can be the main character
-birth_year = 2010
-speaking_style = "Quick, curious, a little sarcastic."
-visual_anchor = "a flat vector illustration of a teenage girl with a green hoodie and round glasses, simple pastel background"
-personality_prompt = "A curious high-school student who learns by asking questions."
-```
-
-The cast must contain at least one enabled `spotlight = true` character, names are unique inside a profile, and `"Narrator"` is reserved. The folder name must match a profile id. A profile with no folder (or no enabled characters) is narrator-only. The full field reference, validation rules and tips are in [data/characters/README.md](data/characters/README.md).
+Run it with `STUDIO_PROFILE=product_promo cargo run`.
 
 ---
 
 ## Quick start
 
-Prerequisites:
+### Prerequisites
 
-- Rust 1.91 or newer (the code uses `Duration::from_mins`).
-- `ffmpeg` and `ffprobe` on `PATH`.
-- API keys: Gemini (script), Cloudflare Workers AI (images), ElevenLabs (voice), YouTube OAuth credentials, optionally a TikTok token.
+- **Rust**, a recent stable toolchain (edition 2021; no minimum version is pinned in `Cargo.toml`).
+- **FFmpeg and ffprobe** on `PATH`.
+- **Speech engine**, one of:
+  - **Piper** (optional, free, local). Install it in `tools/`; if it is present the Builder uses it. Otherwise set `ELEVEN_LABS_KEY_1` and the Builder falls back to ElevenLabs.
+  - **ElevenLabs** (paid/quota-limited): set `ELEVEN_LABS_KEY_1` (and more keys if you have them).
+
+  The `tools/` folder is gitignored (everything except its `.gitignore`), so to use Piper every checkout must provide:
+  - the Piper binary at `./tools/piper/piper`: download a Piper release for your platform from the Piper project's releases and extract it so the executable is `tools/piper/piper`;
+  - the voice model at `./tools/models/en_US-lessac-medium.onnx`, downloaded from the Piper voice collection. Keep the model's `.onnx.json` config next to it, as Piper expects.
+- **API keys**: Gemini (script), Cloudflare Workers AI (images), YouTube OAuth client (uploads), and ElevenLabs unless Piper is installed.
+
+### Run
 
 ```bash
-cp .env.example .env        # then fill in the keys
-cargo build
-STUDIO_PROFILE=explainer cargo run
+cp .env.example .env     # then fill in the keys, see Configuration
+cargo check
+cargo test
+cargo run                # or: STUDIO_PROFILE=explainer cargo run
 ```
 
-Warning: `cargo run` starts a loop that never exits. Every iteration calls paid APIs and uploads the finished video **publicly** to YouTube and TikTok. Do not run it until your keys and the active profile are what you want. Use `cargo check` and `cargo test` to verify changes without side effects.
+On the first run, if no YouTube token is stored in the database, the studio starts a local callback server on `127.0.0.1:8080`, prints a Google authorization URL and tries to open it in your browser. Approve the `youtube.upload` scope. The tokens are saved in the `oauth_tokens` table and refreshed automatically afterwards. Add `http://localhost:8080/auth/callback` as an authorized redirect URI of your Google OAuth client.
+
+`cargo run` starts the scheduler loop and runs until you stop it. It will create up to `workflow_per_day` (3) workflows per day, each one spending Gemini and Cloudflare quota and ending in a **public** YouTube upload. Do not run it casually.
 
 ---
 
 ## Configuration
 
-### Environment variables
+### Environment variables (`.env`)
 
-| Variable | Used by | Purpose |
+| Variable | Used by | Meaning |
 |---|---|---|
-| `STUDIO_PROFILE` | `src/profiles.rs` | Profile id to produce. Empty or unset means `kids_edu`. Unknown id exits at startup. |
-| `STUDIO_DATA_DIR` | `src/main.rs`, `src/characters.rs` | Data folder that holds `characters/<profile_id>/*.toml`. Unset means `./data`. |
-| `APP_DEBUG` | `src/scheduler.rs` | `True` revives sessions that hit `max_retry` immediately instead of waiting. Any other value is off. |
-| `GEMINI_API_KEY` | `src/api/gemini.rs` | Script LLM (active). |
-| `CF_ACCOUNT_ID`, `CF_API_TOKEN` | `src/api/cloudflare.rs` | Image generation (active). |
-| `ELEVENLABS_API_KEY` | `src/api/elevenlabs.rs` | Text-to-speech (active). |
-| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | `src/uploader.rs` | YouTube upload. |
-| `TIKTOK_ACCESS_TOKEN` | `src/uploader.rs` | TikTok upload. Required, see Known issues. |
-| `HF_API_KEY`, `POLLINATIONS_API_KEY` | `src/api/*.rs` | Optional providers that are present but not wired in. |
-| `FAL_API_KEY`, `GOOGLE_ACCESS_TOKEN`, `GOOGLE_PROJECT_ID`, `EDGE_VOICE` | `src/api/*.rs` | Read only by the unused `fal`, `googleapis` and `microsoft_edge` clients. |
+| `STUDIO_PROFILE` | `main.rs`, `entities::active_profile` | Profile id for new workflows. Default `kids_edu`. |
+| `STUDIO_DATA_DIR` | `entities::character::init` | Folder that holds `characters/<profile_id>/*.toml`. Default `./data`. |
+| `GEMINI_KEY_1`, `GEMINI_KEY_2`, ... | Gemini provider | Script LLM keys. Numbered from 1 with no gaps: loading stops at the first missing number. |
+| `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | Workers AI token and account id. Each key needs its own account id. |
+| `ELEVEN_LABS_KEY_n` | ElevenLabs provider | Speech fallback used by the Builder when Piper is not installed. |
+| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | `oauth.rs` | Google OAuth client, used on the first run to authorize and later to refresh tokens. |
+| `YOUTUBE_REFRESH_TOKEN` | `oauth.rs` | Optional. If set and no login is stored, it is saved as the YouTube login, so the browser flow is skipped (handy on headless machines). Needs the client id and secret. |
+| `TIKTOK_ACCESS_TOKEN` | TikTok uploader | Only read if the TikTok uploader is registered (it is not). |
 
-### `src/config.rs`
+`.env` is loaded with `dotenvy` and is gitignored.
 
-Studio-wide technical settings only. What to produce lives in the profile.
+### Static settings (`src/config.rs`, `build_config`)
 
-| Setting | Meaning |
+| Setting | Value | Used by |
+|---|---|---|
+| `video` | 1080 x 1920 at 25 fps | Renderer (every shot is scaled and center-cropped to it), subtitle layout |
+| `workflow_per_day` | 3 | Scheduler |
+| `diffusion` | `num_steps` 4, `guidance` 3.5 | Builder, passed to Cloudflare flux-1-schnell |
+| `tts` | `speed`, `stability`, `similarity_boost` | Builder, ElevenLabs mode only |
+| `voice` | `base_voice` | ElevenLabs voice for the narrator and speakers without a `voice_id`. Use a premade voice: custom voices exist only on the account that created them. |
+| `video` | `width`, `height`, `fps`, `burn_subtitles` | Output frame (1080x1920 @ 25) and whether subtitles are burned in. The `.ass` file is always written. |
+| `cleanup` | `keep_intermediates` | `true` keeps per-shot files and `video.mp4` after publishing (debugging). Default `false`. |
+
+### Constants in code
+
+| Where | Value |
 |---|---|
-| `video.width`, `video.height`, `video.fps` | Output frame size and frame rate (1080x1920, 25). Every scene is scaled and center-cropped to it. |
-| `voice.base_voice` | Fallback ElevenLabs voice id: the narrator's voice and the voice of any speaker without a cast entry. |
-| `voice.default_gender` | Default gender label. |
-| `tts.speed`, `tts.stability`, `tts.similarity_boost` | ElevenLabs voice settings. |
-| `feature.enable_cache`, `enable_subtitle`, `enable_translation` | Feature flags (currently all `false`). |
+| `db.rs` `APP_VERSION` | `1`. Only jobs with this version are claimed. |
+| `db.rs` `DbManager::new` | database file `data_history.db`, created next to where you run the binary |
+| Job `max_retry` | 3 (schema default) |
+| `Transition::DURATION` | 2.0 s cross-fade, shortened to half of the shorter clip |
 
 ---
 
 ## Providers
 
-Provider clients live in `src/api/`. Only `src/renderer.rs` calls them; workflow code never does. Swapping a provider means changing one call there.
+Provider calls go through `ProviderManager` (`src/provider.rs`). Agents ask it for a guard with `acquire(&Provider::X)` and call `guard.call(request)`.
 
-| Role | Active | Called from | Also available |
-|---|---|---|---|
-| Script LLM | Gemini `gemini-2.5-flash` (`gemini::generate_script`) | `build_content` | |
-| Image | Cloudflare `flux-1-schnell` (`cloudflare::generate_image`) | `generate_scene_visual` | fal, Hugging Face, Pollinations, Google APIs |
-| Text-to-speech | ElevenLabs (`elevenlabs::generate_tts`), max 2 concurrent requests | `generate_scene_audio` | Microsoft Edge TTS |
-| Video | FFmpeg | `ffmpeg_render` | |
+| Provider | Purpose | Used by | Model / endpoint | Keys |
+|---|---|---|---|---|
+| `Gemini` | Script LLM, JSON mode | Planner, Writer | `gemini-2.5-flash`, key sent in the `x-goog-api-key` header | `GEMINI_KEY_n`, concurrency 2 |
+| `CFWorker` | Image generation | Builder | Cloudflare Workers AI `@cf/black-forest-labs/flux-1-schnell` | `CF_WORKER_KEY_n` + `CF_WORKER_ACCOUNT_n`, concurrency 10, 100000 requests per key per day |
+| `ElevenLabs` | Text to speech (fallback) | Builder, only when Piper is missing | `eleven_multilingual_v2`, 22.05 kHz 16-bit mono PCM wrapped as WAV | `ELEVEN_LABS_KEY_n`, concurrency 2 |
+
+Speech engine choice happens at runtime in the Builder (`src/agents/builder.rs`): if both `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx` exist **and** the profile's language is English, it runs Piper locally; otherwise it logs why and uses ElevenLabs through the provider manager. Both engines produce the same WAV format, so segments concatenate either way. In ElevenLabs mode each line uses the speaker's `voice_id` (matched by name or nickname in the workflow's profile), otherwise `config.voice.base_voice`.
+
+How the manager behaves:
+
+- Keys are loaded from the environment at startup (`PREFIX_KEY_1`, `PREFIX_KEY_2`, ...) and used round-robin.
+- A key has an in-memory daily counter and an optional daily limit.
+- A quota response (`RequestExceeded`) blocks that key for the provider's `retry_after` (5 s) and the call moves on to the next key.
+- An invalid or revoked key (`RequestUnauthorized`) is disabled until tomorrow and the call moves on, so one bad key never fails a job.
+- An account-specific refusal (`KeyRejected`, e.g. an ElevenLabs `voice_not_found` for a voice that lives on another account) skips that key for an hour and tries the next one.
+- Other errors count as failures for a circuit breaker: 5 failures in a row open it for 60 seconds, during which `acquire` returns `None` (the job fails and is retried with backoff). Any successful call closes it.
+- `acquire` waits while the provider is at its concurrency limit or every key is blocked or over its limit.
+- Error messages strip URLs, and logs print the key number, never the key.
+
+**Several keys, same result.** Every request carries its full context, so it doesn't matter which key answers: Gemini calls are single-turn (the Planner gets topic history from the database, the Writer gets the story and cast in its prompt), Cloudflare image requests use a fixed seed per workflow (same prompt, same image on any account), and every ElevenLabs line uses the same voice id and settings. Keep custom ElevenLabs voices on every account whose key you add, or use premade voices.
+
+To add a provider, see `.claude/skills/add-provider/SKILL.md`.
 
 ---
 
 ## Output layout
 
+Each workflow writes to `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`; the date is the workflow's creation date in local time, so a workflow that runs past midnight stays in one folder). `output/` is gitignored.
+
 ```text
 output/
-└── 20260101_explainer/              # {YYYYMMDD}_{profile_id}
-    └── <session_id>/
-        ├── images/
-        │   ├── scene_1.png
-        │   └── scene_2.png
-        ├── audios/
-        │   ├── scene_1.mp3
-        │   └── scene_2.mp3
-        ├── videos/
-        │   ├── scene_1.mp4
-        │   └── scene_2.mp4
-        └── final_video.mp4
+└── 20260101/
+    └── 6f1c0b9e-.../              # workflow id
+        ├── shot_1/
+        │   ├── image.png          # Builder: Cloudflare image (square)
+        │   ├── audio.wav          # Builder: speech (Piper or ElevenLabs), segments concatenated
+        │   └── video.mp4          # Renderer: one clip per shot
+        ├── shot_2/ ...
+        ├── video.mp4              # Renderer: clips joined with transitions
+        ├── subtitle.ass           # Renderer: subtitles
+        └── final_video.mp4        # Renderer: video + burned-in subtitles (uploaded)
 ```
-
-The date is the day the session was created. SQLite state lives in `./data_history.db`.
 
 ---
 
-## State, resume and retries
+## Reliability
 
-State is stored as JSON in the `workflow_state` table after every stage. Behavior of the loop in `src/scheduler.rs`:
-
-- On each iteration it resumes the most recently updated unfinished session whose `version` equals `APP_VERSION` (`src/db.rs`); if there is none, it starts a new session with the active profile.
-- When a stage fails, the retry counter increases, the error is saved, and the loop sleeps for an exponential backoff: the ceiling starts at 2 s and doubles per failure up to 30 minutes (`helper::next_backoff`), with random jitter between half the ceiling and the ceiling. It resets after every successful stage.
-- `max_retry` is 3. Once reached:
-  - If the session was last updated 30 minutes ago or more, it is deleted and a fresh session starts.
-  - Otherwise the scheduler logs it and waits 10 minutes, or with `APP_DEBUG=True` revives it immediately.
-  - If the timestamp cannot be parsed, the session is cancelled and the scheduler waits 30 minutes.
-- If the database cannot be read, it waits 30 minutes and tries again.
-- After a successful session it marks it `done`, saves the topic to `topic_history`, and sleeps 10 minutes.
-- Builder and Renderer skip files that already exist, so a retry only does the missing work. Delete files to force regeneration.
-- Topic dedup uses the last 20 topics of the session's profile. Topics are saved only after a successful End, so failed runs do not count.
-- Bump `APP_VERSION` in `src/db.rs` when `VideoState` or the artifact schema changes incompatibly, so sessions saved by an older build are ignored rather than failing to load.
-- A saved session whose profile no longer exists in `PROFILES` is cancelled.
-- Assets and renders are written to a `.part` file and renamed when complete, so an interrupted run never leaves a half-written file that would be reused.
+- **Retries with backoff.** When an agent returns an error, `AgentPool` calls `db.retry_job`: the job goes back to `pending` with `retry_count + 1` and `jobs.run_after` set 60 s, 120 s, 240 s ... later (doubling, capped at 1 hour, `db::retry_delay_secs`). `claim_job` ignores jobs whose `run_after` is in the future.
+- **Giving up.** `max_retry` (3) is the total number of attempts (`agent::should_retry`). After the third failed attempt `db.fail_job` marks the job and its workflow `failed`.
+- **Crash recovery.** At startup `recover_interrupted_jobs` puts every job left in `processing` back to `pending`, so a crash never blocks the queue (a stuck Planner job would block new workflows).
+- **Pool full.** A job claimed while its agent pool is full is released with `release_job`, which keeps its retry count.
+- **Completion.** A workflow becomes `completed` in the Cleaner, `failed` in `fail_job`.
+- **Atomic files.** Images, audio, clips and videos are written to `<path>.part` and renamed, so a crash never leaves a truncated file that a later run would skip.
+- **Idempotent skips.** The Builder skips shots whose `image.png` or `audio.wav` exists, the Renderer skips existing `shot_N/video.mp4` and an existing `final_video.mp4`. Delete a file to force regeneration.
+- **Bad provider output.** The Builder rejects image responses that are not PNG, JPEG or WebP, and the storyboard parser falls back instead of failing on unknown motion, transition or position names.
 
 ---
 
 ## Project structure
 
 ```text
-src/
-├── api/                # one HTTP client per provider
-│   ├── cloudflare.rs
-│   ├── elevenlabs.rs
-│   ├── fal.rs
-│   ├── gemini.rs
-│   ├── googleapis.rs
-│   ├── hugging_face.rs
-│   ├── microsoft_edge.rs
-│   ├── pollinations.rs
-│   └── mod.rs
-├── characters.rs       # loads and validates data/characters/<profile_id>/*.toml
-├── config.rs           # studio-wide settings: base voice, TTS, feature flags
-├── db.rs               # SQLite: topic_history + resumable workflow_state
-├── enums.rs            # AgentNode, Motion, Transition, VoiceMode
-├── helper.rs           # time, backoff, media detection, error context
-├── main.rs             # entrypoint: select profile, start scheduler
-├── models.rs           # VideoState, VideoArtifact, Scene, VideoTimeline
-├── profiles.rs         # StudioProfile, PROFILES, active_profile, cast() lookup
-├── renderer.rs         # provider selection, asset generation, FFmpeg render
-├── scheduler.rs        # main loop, retry/backoff, session resume
-├── uploader.rs         # YouTube + TikTok upload
-└── workflow.rs         # Planner -> Writer -> Builder -> Renderer -> Publisher
-
-data/
-└── characters/
-    ├── README.md       # how to add a character
-    └── kids_edu/       # one folder per profile id, one .toml per character
-        ├── 01_bin.toml
-        ├── 02_yen.toml
-        ├── 03_nam.toml
-        └── 04_suong.toml
+.
+├── Cargo.toml
+├── .env.example
+├── migrations/
+│   └── schema_01.sql            # workflows, jobs, providers, oauth_tokens
+├── data/characters/
+│   ├── README.md                # character file reference
+│   └── kids_edu/*.toml          # cast of the kids_edu profile
+├── tools/                       # gitignored: Piper binary and voice model
+├── output/                      # gitignored: generated videos
+├── .claude/skills/              # skills for coding agents
+└── src/
+    ├── main.rs                  # AppState, provider/uploader registration, startup
+    ├── workflow.rs              # WorkflowEngine: scheduler + dispatch loop
+    ├── agent.rs                 # Agent trait, AgentType, AgentPool, AgentError, job_profile
+    ├── agents/                  # manager, planner, writer, builder, renderer, publisher, cleaner
+    ├── entities/
+    │   ├── profile.rs           # StudioProfile, PROFILES
+    │   ├── character.rs         # Character, TOML loading and validation
+    │   └── movie.rs             # StoryContext, Storyboard, Shot, Timeline, Motion, Transition
+    ├── models/                  # Job, Workflow, statuses, OAuthToken
+    ├── db.rs                    # DbManager: queue, workflows, topics, tokens
+    ├── provider.rs              # ProviderManager, ProviderClient, keys, circuit breaker
+    ├── providers/               # gemini.rs, cf_worker.rs, eleven_labs.rs
+    ├── uploader.rs              # Uploader trait, UploaderManager, UploaderState
+    ├── uploaders/               # youtube.rs, tiktok.rs
+    ├── oauth.rs                 # YouTube OAuth flow and token refresh
+    ├── config.rs                # static settings
+    └── helper.rs                # write_atomic, is_image, truncate_chars
 ```
+
+### The database
+
+`data_history.db` (SQLite, gitignored). The schema is in `migrations/schema_01.sql` and is applied **only when the database file is created**. The project is not deployed yet, so to change the schema, edit `schema_01.sql` and delete your local `data_history.db`.
 
 ---
 
 ## Development
 
 ```bash
-cargo check     # fast type-check, run after every edit
-cargo clippy    # lints
-cargo test                # unit tests
-cargo test -- --ignored   # real FFmpeg render on generated assets (needs ffmpeg, no API calls)
+cargo check                # fast type-check, use after every edit
+cargo clippy               # lints
+cargo test                 # unit tests (profiles, characters, storyboard, planner, renderer ASS, db queue, helpers, YouTube title)
+cargo test -- --ignored    # real FFmpeg render on generated assets, no API calls
 ```
 
-`cargo test` runs:
+Tests need `ffmpeg` and `ffprobe` on `PATH` only for the ignored render test. No test calls a paid API or uploads.
 
-- `profiles::tests::profiles_are_well_formed`: every profile has a unique lowercase-slug id, the default profile exists, and duration and scene ranges are sane. Casts are validated by the loader at startup instead.
-- `characters::tests::{repo_data_loads, minimal_file_only_needs_a_name, rejects_bad_data}`: the repo's `data/characters` loads (4 kids_edu characters, explainer has none), a file with only `name` is valid, and bad data (unknown profile folder, duplicate name, `Narrator`, no spotlight, misspelled field) is rejected.
-- workflow tests: character file fields reach the Writer prompt, and artifact normalization.
-- `db::tests`: topics are scoped per profile; resume picks the latest unfinished session, even when a finished one was saved later.
-- `helper::tests`: media sniffing rejects empty, truncated and HTML/JSON error bodies; backoff doubles and caps; titles truncate on character boundaries.
-- `renderer::tests::fade_never_exceeds_half_a_clip`, and the ignored `renders_mixed_motions_short_scenes_and_single_scene`, which renders real clips with FFmpeg (mixed motions, a 0.6 s scene, an unknown transition, a one-scene video) and checks the final length and 1080x1920 size.
+Do not use `cargo run` to test: it spends credits and uploads publicly.
 
 ---
 
-## Known issues and limitations
+## Known limitations
 
-- Visuals are still images animated with `zoompan` camera motion, not generated video. Cloudflare returns square images, which are center-cropped to 9:16, so the Writer is told to keep subjects centered.
-- Only Gemini is wired as the script provider.
-- Uploads are always public; there is no dry-run mode.
-- TikTok `PUBLIC_TO_EVERYONE` posting requires an audited TikTok app; unaudited apps get an error (logged, not fatal).
-- The default `SingleVoice` mode voices a whole scene with the first speaker's voice. `VoiceMode::PerSegment` (one voice per line) exists but is not enabled.
-
----
-
-## Roadmap
-
-* [ ] Subtitle generation
-* [ ] Background music generation
-* [ ] Thumbnail generation
-* [ ] Multi-language support
-* [ ] Content quality review agent
-* [ ] SEO optimization agent
-* [ ] Automatic scheduling and publishing
+- **TikTok is not registered.** `TiktokUploader` exists, and the Publisher builds a TikTok config, but `main.rs` registers only the YouTube uploader, so TikTok is skipped silently.
+- **Piper speaks English only.** It uses the English `en_US-lessac-medium` model, so the Builder uses Piper only for profiles whose `language` is English; other languages always go to ElevenLabs (`eleven_multilingual_v2`).
+- **`voice_id` is ignored by Piper.** With Piper every character speaks with the same voice; per-character voices only work in ElevenLabs mode.
+- **Images are square.** flux-1-schnell returns a square picture, which the Renderer center-crops to 9:16, so the Writer is told to keep the main subject centered.
+- **Uploads are always public** (`privacyStatus: "public"`).
+- **`acquire` can wait forever.** If every key of a provider is blocked or over its daily limit, `acquire` loops until one frees up instead of failing.
+- **Manager agent is a placeholder.**
 
 ---
 
 ## License
 
-MIT License
+MIT, see [LICENSE](LICENSE).

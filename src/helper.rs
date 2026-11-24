@@ -1,116 +1,36 @@
-use chrono::{Local, Datelike, Utc};
-use rand::Rng;
-
-use crate::enums::*;
-
-pub fn now_ts() -> String {
-    Local::now()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string()
-}
-
-pub fn now_ymd() -> String {
-    Local::now()
-        .format("%Y%m%d")
-        .to_string()
-}
-
-pub fn now_rfc() -> String {
-    Local::now().to_rfc3339()
-}
-
-pub fn now_age(birth_year: i32) -> i32 {
-    calc_age(birth_year, Utc::now().year())
-}
-
-pub fn calc_age(birth_year: i32, current_year: i32) -> i32 {
-    current_year - birth_year
-}
-
-/// Initial retry delay in milliseconds.
-pub const BASE_BACKOFF_MS: u64 = 1_000;
-/// Upper bound for the retry delay.
-pub const MAX_BACKOFF_MS: u64 = 30 * 60_000;
-
-/// Next exponential backoff ceiling: doubles each failure, capped at `MAX_BACKOFF_MS`.
-pub fn next_backoff(current_ms: u64) -> u64 {
-    current_ms.max(BASE_BACKOFF_MS).saturating_mul(2).min(MAX_BACKOFF_MS)
-}
-
-/// Random delay in `[ceiling/2, ceiling]` so retries don't all fire at once.
-pub fn jitter(ceiling_ms: u64) -> u64 {
-    rand::thread_rng().gen_range(ceiling_ms / 2..=ceiling_ms)
-}
-
-pub fn ctx(node: &str, err: impl ToString) -> String {
-    format!("[{}] {}", node, err.to_string())
-}
-
-/// Sniff the media type from magic bytes. Returns `None` for HTML/JSON error
-/// bodies and anything unrecognized.
-pub fn detect_media(bytes: &[u8]) -> Option<MediaType> {
-    if is_html(bytes) {
-        return None;
-    }
-
-    if is_png(bytes) || is_jpg(bytes) || is_webp(bytes) {
-        return Some(MediaType::Image);
-    }
-
-    if is_mp4(bytes) {
-        return Some(MediaType::Video);
-    }
-
-    if is_mp3(bytes) {
-        return Some(MediaType::Audio);
-    }
-
-    None
-}
-
-/// Error unless `bytes` is media of the `expected` type.
-pub fn expect_media(bytes: &[u8], expected: MediaType, what: &str) -> Result<(), String> {
-    match detect_media(bytes) {
-        Some(found) if found == expected => Ok(()),
-        found => {
-            let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]);
-            Err(format!("Invalid {} response (expected {:?}, got {:?}): {}", what, expected, found, preview))
-        }
-    }
-}
-
-pub fn is_png(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0x89, b'P', b'N', b'G'])
-}
-
-pub fn is_jpg(bytes: &[u8]) -> bool {
-    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
-}
-
-pub fn is_webp(bytes: &[u8]) -> bool {
-    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
-}
-
-pub fn is_mp4(bytes: &[u8]) -> bool {
-    bytes.len() > 12 && bytes[4..8] == *b"ftyp"
-}
-
-pub fn is_mp3(bytes: &[u8]) -> bool {
-    // ID3 tag, or an MPEG audio frame sync (11 set bits).
-    bytes.starts_with(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0)
-}
-
-pub fn is_html(bytes: &[u8]) -> bool {
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(64)]).trim_start().to_ascii_lowercase();
-    head.starts_with("<!doctype") || head.starts_with("<html")
-}
+//! Small shared helpers: atomic file writes, media sniffing, text limits.
 
 /// Write a file atomically: write to `<path>.part`, then rename. A crash mid-write
-/// never leaves a truncated file that later runs would mistake for a finished asset.
+/// never leaves a truncated file that later runs would skip as "already exists".
 pub async fn write_atomic(path: &str, bytes: &[u8]) -> Result<(), String> {
-    let tmp = format!("{}.part", path);
-    tokio::fs::write(&tmp, bytes).await.map_err(|e| ctx("write", format!("{}: {}", tmp, e)))?;
-    tokio::fs::rename(&tmp, path).await.map_err(|e| ctx("write", format!("{}: {}", path, e)))
+    let tmp = part_path(path);
+    tokio::fs::write(&tmp, bytes).await.map_err(|e| format!("write {}: {}", tmp, e))?;
+    tokio::fs::rename(&tmp, path).await.map_err(|e| format!("rename {}: {}", path, e))
+}
+
+/// Temporary path used while `path` is being produced.
+pub fn part_path(path: &str) -> String {
+    format!("{}.part", path)
+}
+
+/// Move a finished `<path>.part` into place.
+pub async fn commit_part(path: &str) -> Result<(), String> {
+    tokio::fs::rename(part_path(path), path)
+        .await
+        .map_err(|e| format!("rename {}: {}", path, e))
+}
+
+/// True for PNG, JPEG or WebP data. Providers sometimes answer 200 with an
+/// HTML or JSON error body; this keeps those from being saved as images.
+pub fn is_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP")
+}
+
+/// Short, printable preview of a response body for error messages.
+pub fn preview(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string()
 }
 
 /// Cut `s` to at most `max` characters (not bytes), so multi-byte text never splits.
@@ -123,25 +43,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detect_media_handles_short_and_error_bodies() {
-        assert!(detect_media(&[]).is_none());
-        assert!(detect_media(&[0xFF]).is_none());
-        assert!(detect_media(b"RIFF").is_none());
-        assert!(detect_media(b"  <!DOCTYPE html><html>").is_none());
-        assert!(detect_media(br#"{"error":"quota"}"#).is_none());
-        assert_eq!(detect_media(&[0x89, b'P', b'N', b'G', 0, 0]), Some(MediaType::Image));
-        assert_eq!(detect_media(b"ID3\x04\x00"), Some(MediaType::Audio));
-        assert_eq!(detect_media(&[0xFF, 0xFB, 0x90, 0x00]), Some(MediaType::Audio));
-        assert!(expect_media(b"ID3\x04\x00", MediaType::Image, "image").is_err());
-    }
-
-    #[test]
-    fn backoff_grows_and_caps() {
-        assert_eq!(next_backoff(0), 2_000);
-        assert_eq!(next_backoff(2_000), 4_000);
-        assert_eq!(next_backoff(MAX_BACKOFF_MS), MAX_BACKOFF_MS);
-        let j = jitter(4_000);
-        assert!((2_000..=4_000).contains(&j));
+    fn is_image_rejects_short_and_error_bodies() {
+        assert!(!is_image(&[]));
+        assert!(!is_image(b"RIFF"));
+        assert!(!is_image(br#"{"errors":[{"code":10000}]}"#));
+        assert!(is_image(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A]));
+        assert!(is_image(&[0xFF, 0xD8, 0xFF, 0xE0]));
     }
 
     #[test]

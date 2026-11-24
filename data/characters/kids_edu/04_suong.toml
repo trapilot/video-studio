@@ -1,11 +1,11 @@
-# Diễm Sương — cast of the kids_edu profile.
-# One file per character. Only `name` is required; see data/characters/README.md for every field.
+# Diễm Sương: cast of the kids_edu profile.
+# One file per character. Only `name` is required; see data/characters/README.md.
 
 enabled = true
 spotlight = false
 
 name = "Diễm Sương"
-nickname = "Mẹ Sương"
+nickname = "Suong"
 birth_year = 1993
 
 role = "Mother"
@@ -17,7 +17,7 @@ topic_domain = "Education, Family, Life Skills"
 
 catchphrase = "Listen to me!"
 speaking_style = "Warm, caring, nurturing, occasionally firm when teaching lessons."
-visual_anchor = "a 3D Pixar style illustration of a gentle Vietnamese mother in her early 30s, long black hair, pastel blouse, holding a book and cooking spoon, warm smile, white background"
+visual_template = "A 3D Pixar-style character illustration of the Vietnamese mother, with her precise facial features and warm smile preserved. She is {age} years old, wearing her original white sleeveless top and wide-leg white pants, with a pair of metal-framed sunglasses tucked into the neckline. Her pose is friendly and forward-facing, set against a clean, subtly graded light grey studio background. The character model is entire and well-lit with soft, warm studio lighting, perfect for a high-quality character render. All features and clothing details are clear and detailed"
 
 strengths = "Patient, loving, organized, empathetic."
 weaknesses = "Can become worried easily, sometimes overprotective."
@@ -25,4 +25,5 @@ core_values = "Family, respect, kindness, good habits."
 
 relationship_prompt = "Diem Suong is Bin's mother and Nam's wife. She helps Bin learn responsibility and good behavior."
 personality_prompt = "A caring elementary school teacher who loves her family and wants children to grow into kind people."
-# voice_id = "..."   # ElevenLabs voice id; omit to use CONFIG.voice.base_voice
+
+# voice_id = "..."   # TTS voice for this character; omit to use the default voice

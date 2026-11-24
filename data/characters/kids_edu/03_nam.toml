@@ -1,11 +1,11 @@
-# Nam — cast of the kids_edu profile.
-# One file per character. Only `name` is required; see data/characters/README.md for every field.
+# Nam: cast of the kids_edu profile.
+# One file per character. Only `name` is required; see data/characters/README.md.
 
 enabled = true
 spotlight = false
 
 name = "Nam"
-nickname = "Ba Nam"
+nickname = "Nam"
 birth_year = 1990
 
 role = "Father"
@@ -17,7 +17,7 @@ topic_domain = "Technology, Logic, Problem Solving"
 
 catchphrase = "What do you think about this?"
 speaking_style = "Calm, logical, patient, explains things step by step."
-visual_anchor = "a 3D Pixar style illustration of a friendly Vietnamese father in his mid 30s, glasses, polo shirt, holding a laptop, white background"
+visual_template = "A 3D Pixar-style character illustration of the Vietnamese father, with his precise facial features, welcoming smile, and thin metal-framed spectacles preserved. He is {age} years old and is wearing a well-fitted black crew-neck t-shirt and classic blue denim jeans, with simple dark sneakers. His pose is friendly and forward-facing, set against a clean, subtly graded light grey studio background. The character model is entire and well-lit with soft, warm studio lighting, perfect for a high-quality character render. All features, eyeglasses, and clothing details are clear and detailed"
 
 strengths = "Wise, patient, analytical, dependable."
 weaknesses = "Perfectionist, strict with rules, sometimes too serious."
@@ -25,4 +25,5 @@ core_values = "Responsibility, honesty, critical thinking, discipline."
 
 relationship_prompt = "Nam is Bin's father and Diem Suong's husband. Bin often asks him questions about the world."
 personality_prompt = "A thoughtful software engineer who enjoys teaching children how things work."
-# voice_id = "..."   # ElevenLabs voice id; omit to use CONFIG.voice.base_voice
+
+# voice_id = "..."   # TTS voice for this character; omit to use the default voice
