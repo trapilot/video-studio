@@ -249,7 +249,7 @@ How the manager behaves:
 - Keys are loaded from the environment at startup (`PREFIX_KEY_1`, `PREFIX_KEY_2`, ...) and used round-robin.
 - A key has an in-memory daily counter and an optional daily limit.
 - A quota response (`RequestExceeded`) blocks that key for the provider's `retry_after` (5 s) and the call moves on to the next key.
-- Other errors count as failures for a circuit breaker (5 failures open it for 60 seconds, during which `acquire` returns `None`).
+- Other errors count as failures for a circuit breaker: 5 failures in a row open it for 60 seconds, during which `acquire` returns `None` (the job fails and is retried with backoff). Any successful call closes it.
 - `acquire` waits while the provider is at its concurrency limit or every key is blocked or over its limit.
 - Error messages strip URLs, and logs print the key number, never the key.
 
@@ -353,8 +353,6 @@ Do not use `cargo run` to test: it spends credits and uploads publicly.
 - **Images are square.** flux-1-schnell returns a square picture, which the Renderer center-crops to 9:16, so the Writer is told to keep the main subject centered.
 - **Uploads are always public** (`privacyStatus: "public"`).
 - **`acquire` can wait forever.** If every key of a provider is blocked or over its daily limit, `acquire` loops until one frees up instead of failing.
-- **Circuit breaker.** It is implemented, but releasing a provider guard resets the failure count, so in practice it does not open.
-- **OAuth first run.** Once the `youtube` row exists in `oauth_tokens`, later startups do not restart the authorization flow, even if the first authorization was never completed. If uploads fail with "Missing youtube access token", delete the row (or the database) and start again.
 - **Manager agent is a placeholder** and the Cleaner does not delete generated files.
 
 ---
