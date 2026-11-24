@@ -36,26 +36,14 @@ End
 
 ## Supported Providers
 
-### LLM
+Provider clients live in `src/api/`. The active ones are chosen in `src/renderer.rs`.
 
-* Gemini
-* OpenRouter
-
-### Image Generation
-
-* OpenAI GPT Image
-* Gemini Image
-* Cloudflare
-
-### Text-to-Speech
-
-* OpenAI TTS
-* Gemini TTS
-* ElevenLabs
-
-### Video Rendering
-
-* FFmpeg
+| Role | Active | Also available |
+|---|---|---|
+| Script LLM | Gemini (`gemini-2.5-flash`) | — |
+| Image | Cloudflare Workers AI (`flux-1-schnell`) | fal, Hugging Face, Pollinations, Google APIs |
+| Text-to-Speech | ElevenLabs | Microsoft Edge TTS |
+| Video rendering | FFmpeg | — |
 
 ---
 
@@ -63,22 +51,26 @@ End
 
 ```text
 src/
-├── agents/
+├── api/                # one HTTP client per provider
+│   ├── cloudflare.rs
+│   ├── elevenlabs.rs
+│   ├── fal.rs
 │   ├── gemini.rs
-│   ├── openai.rs
-│   └── openrouter.rs
-│
-├── db.rs
-├── enums.rs
-├── helper.rs
-├── macro_rules.rs
-├── main.rs
-├── models.rs
-├── renderer.rs
-├── scheduler.rs
-├── uploader.rs
-├── workflow.rs
-└── main.rs
+│   ├── googleapis.rs
+│   ├── hugging_face.rs
+│   ├── microsoft_edge.rs
+│   ├── pollinations.rs
+│   └── mod.rs
+├── config.rs           # static config (language, voice, TTS, feature flags)
+├── db.rs               # SQLite: topic history + resumable workflow state
+├── enums.rs            # AgentNode, Motion, Transition, VoiceMode
+├── helper.rs           # time, backoff, media detection, error context
+├── main.rs             # entrypoint → scheduler
+├── models.rs           # VideoState, characters, script/timeline schema
+├── renderer.rs         # provider selection, asset generation, FFmpeg render
+├── scheduler.rs        # main loop, retry/backoff, session resume
+├── uploader.rs         # YouTube + TikTok upload
+└── workflow.rs         # Planner → Writer → Builder → Renderer → Publisher state machine
 ```
 
 ---
@@ -91,6 +83,7 @@ OPENAI_API_KEY=
 GEMINI_API_KEY=
 OPENROUTER_API_KEY=
 ELEVENLABS_API_KEY=
+POLLINATIONS_API_KEY=
 
 CF_ACCOUNT_ID=
 CF_API_TOKEN=
@@ -102,12 +95,17 @@ YOUTUBE_REFRESH_TOKEN=
 TIKTOK_ACCESS_TOKEN=
 ```
 
+Copy `.env.example` to `.env` and fill in the keys you use (`POLLINATIONS_API_KEY` is also supported).
+
 ---
 
 ## Running
 
+Requires `ffmpeg` and `ffprobe` on `PATH`.
+
 ```bash
-cargo run
+cargo run                   # start the scheduler loop
+APP_DEBUG=True cargo run    # auto-revive sessions that exhausted retries
 ```
 
 ---
