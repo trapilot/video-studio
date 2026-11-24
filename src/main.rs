@@ -5,6 +5,7 @@ mod config;
 mod provider;
 mod uploader;
 mod workflow;
+mod helper;
 
 mod agents;
 mod models;
@@ -91,6 +92,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !oauth::has_auth_token(&state.services.db).await {
         oauth::start_oauth_server(&state.services.db).await;
+    }
+
+    let recovered = state.services.db.recover_interrupted_jobs().await?;
+    if recovered > 0 {
+        println!("🔁 Requeued {} job(s) interrupted by the last shutdown", recovered);
     }
 
     let revert_job = "";

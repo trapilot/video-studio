@@ -4,12 +4,21 @@ use serde::Deserialize;
 /// publish metadata) lives in the per-video-type profiles (`entities/profile.rs`).
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub video: VideoConfig,
     pub voice: VoiceConfig,
     pub tts: TtsConfig,
     pub diffusion: DiffusionParams,
     pub feature: FeatureConfig,
     pub workflow_per_day: i64,
     // pub workflow_gap_minutes: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoConfig {
+    /// Output frame size. Every shot is scaled and center-cropped to it.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +49,12 @@ pub struct FeatureConfig {
 
 pub fn build_config() -> Config {
     Config {
+        // Vertical 9:16 for YouTube Shorts and TikTok (the subtitle layout assumes it too).
+        video: VideoConfig {
+            width: 1080,
+            height: 1920,
+            fps: 25,
+        },
         workflow_per_day: 3,
         // workflow_gap_minutes: 15,
         voice: VoiceConfig {

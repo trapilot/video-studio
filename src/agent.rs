@@ -97,9 +97,9 @@ impl AgentPool {
                 let max_retry = job_clone.max_retry;
 
                 let db_result = if retry_count < max_retry {
-                    state_clone.services.db.retry_job(&job_clone.id, e.to_string()).await
+                    state_clone.services.db.retry_job(&job_clone.id, retry_count, e.to_string()).await
                 } else {
-                    state_clone.services.db.fail_job(&job_clone.id, e.to_string()).await
+                    state_clone.services.db.fail_job(&job_clone, e.to_string()).await
                 };
 
                 match db_result {

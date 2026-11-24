@@ -100,13 +100,14 @@ impl WorkflowEngine {
             };
 
             let Some(entry) = self.registry.get(&job.agent) else {
-                let _ = self.state.services.db.revert_job(&job.id).await;
+                let _ = self.state.services.db.release_job(&job.id).await;
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                 continue;
             };
 
+            // Pool full: hand the job back without resetting its retry count.
             if !entry.try_spawn(self.state.clone(), job.clone()) {
-                let _ = self.state.services.db.revert_job(&job.id).await;
+                let _ = self.state.services.db.release_job(&job.id).await;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

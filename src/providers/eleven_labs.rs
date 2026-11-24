@@ -89,7 +89,7 @@ impl ElevenLabsClient {
                     .map_err(|e| {
                         ProviderError::ClientResponse {
                             client: "ElevenLabs".to_string(),
-                            error: e.to_string(),
+                            error: e.without_url().to_string(),
                         }
                     })?;
                 

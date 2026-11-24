@@ -32,6 +32,11 @@ impl Agent for CleanerAgent {
             .await
             .map_err(|e| AgentError::Handoff(e.to_string()))?;
 
+        state.services.db
+            .set_workflow_status(&job.workflow_id, WorkflowStatus::Completed)
+            .await
+            .map_err(|e| AgentError::Handoff(e.to_string()))?;
+
         Ok(())
     }
 }

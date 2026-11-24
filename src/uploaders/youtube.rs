@@ -61,7 +61,7 @@ impl YoutubeUploader {
                 made_for_kids,
             } => serde_json::json!({
                 "snippet": {
-                    "title": title,
+                    "title": youtube_title(title),
                     "description": description,
                     "tags": tags,
                     "categoryId": category_id,
@@ -77,7 +77,10 @@ impl YoutubeUploader {
 
         let video_bytes = tokio::fs::read(video_path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("read {}: {}", video_path, e))?;
+        if video_bytes.is_empty() {
+            return Err(format!("{} is empty", video_path));
+        }
 
         let boundary = "foo_bar_baz";
 
@@ -88,7 +91,7 @@ impl YoutubeUploader {
             b = boundary
         ).as_bytes());
 
-        full_body.extend(serde_json::to_string(&metadata).unwrap().as_bytes());
+        full_body.extend(metadata.to_string().as_bytes());
         full_body.extend(b"\r\n");
 
         full_body.extend(format!(
@@ -107,7 +110,7 @@ impl YoutubeUploader {
             .body(full_body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("YouTube upload failed: {}", e.without_url()))?;
 
         let status = res.status();
         let text = res.text().await.map_err(|e| e.to_string())?;
@@ -118,5 +121,28 @@ impl YoutubeUploader {
         } else {
             Err(format!("upload failed: {status}, body: {text}"))
         }
+    }
+}
+
+/// YouTube rejects titles over 100 characters or containing angle brackets.
+fn youtube_title(title: &str) -> String {
+    let clean: String = title.chars().filter(|c| *c != '<' && *c != '>').collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        "Untitled".to_string()
+    } else {
+        crate::helper::truncate_chars(clean, 100)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn youtube_title_is_sanitized() {
+        assert_eq!(youtube_title(" <Why> stars twinkle "), "Why stars twinkle");
+        assert_eq!(youtube_title(&"é".repeat(150)).chars().count(), 100);
+        assert_eq!(youtube_title("<>"), "Untitled");
     }
 }

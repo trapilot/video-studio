@@ -30,7 +30,7 @@ impl Agent for PublisherAgent {
             made_for_kids: profile.publish.made_for_kids,
         });
         configs.insert(uploader::Channel::Tiktok, uploader::ChannelConfig::Tiktok {
-            privacy_level: "PUBLIC".into(),
+            privacy_level: "PUBLIC_TO_EVERYONE".into(),
             disable_comment: true,
         });
 

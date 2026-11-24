@@ -8,6 +8,11 @@ use crate::models::*;
 
 pub const APP_VERSION: u8 = 1;
 
+/// Delay before retry number `retry_count + 1`: 60 s doubling, capped at 1 h.
+pub fn retry_delay_secs(retry_count: i64) -> i64 {
+    (60_i64 << retry_count.clamp(0, 6)).min(3600)
+}
+
 #[derive(Clone)]
 pub struct DbManager {
     pub pool: SqlitePool,
@@ -160,6 +165,7 @@ impl DbManager {
                 SELECT id
                 FROM jobs
                 WHERE version = ? AND status = ? AND locked_at IS NULL
+                  AND (run_after IS NULL OR run_after <= ?)
                 ORDER BY created_at
                 LIMIT 1
             )
@@ -170,6 +176,7 @@ impl DbManager {
         .bind(chrono::Utc::now().timestamp())
         .bind(APP_VERSION)
         .bind(JobStatus::Pending.to_string())
+        .bind(chrono::Utc::now().timestamp())
         .fetch_optional(&self.pool)
         .await?;
 
@@ -203,21 +210,28 @@ impl DbManager {
         Ok(())
     }
 
+    /// Put a failed job back in the queue, runnable again after an exponential
+    /// backoff (1 min, 2 min, 4 min, ... capped at 1 h) so a failing provider
+    /// isn't hammered.
     pub async fn retry_job(
         &self,
         job_id: &str,
+        retry_count: i64,
         error: String,
     ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().timestamp();
         sqlx::query(
             r#"
             UPDATE jobs
-            SET status = ?, result = ?, updated_at = ?, locked_at = NULL, retry_count = retry_count + 1
+            SET status = ?, result = ?, updated_at = ?, locked_at = NULL,
+                retry_count = retry_count + 1, run_after = ?
             WHERE id = ?
             "#,
         )
         .bind(JobStatus::Pending.to_string())
         .bind(error)
-        .bind(chrono::Utc::now().timestamp())
+        .bind(now)
+        .bind(now + retry_delay_secs(retry_count))
         .bind(job_id)
         .execute(&self.pool)
         .await?;
@@ -225,26 +239,64 @@ impl DbManager {
         Ok(())
     }
 
+    /// Give up on a job and mark its workflow failed.
     pub async fn fail_job(
         &self,
-        job_id: &str,
+        job: &Job,
         error: String,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             UPDATE jobs
-            SET status = ?, result = ?, updated_at = ?
+            SET status = ?, result = ?, updated_at = ?, locked_at = NULL
             WHERE id = ?
             "#,
         )
         .bind(JobStatus::Failed.to_string())
         .bind(error)
         .bind(chrono::Utc::now().timestamp())
-        .bind(job_id)
+        .bind(&job.id)
         .execute(&self.pool)
         .await?;
 
+        self.set_workflow_status(&job.workflow_id, WorkflowStatus::Failed).await
+    }
+
+    pub async fn set_workflow_status(
+        &self,
+        workflow_id: &str,
+        status: WorkflowStatus,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workflows SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(status.to_string())
+            .bind(chrono::Utc::now().timestamp())
+            .bind(workflow_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
+    }
+
+    /// Unlock a claimed job that couldn't be started (agent pool full), without
+    /// touching its retry count.
+    pub async fn release_job(&self, job_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE jobs SET status = ?, locked_at = NULL WHERE id = ?")
+            .bind(JobStatus::Pending.to_string())
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// At startup nothing is running yet, so any job still marked processing was
+    /// interrupted by a crash or restart. Requeue it; otherwise it stays locked
+    /// forever and (for the Planner) blocks every new workflow.
+    pub async fn recover_interrupted_jobs(&self) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query("UPDATE jobs SET status = ?, locked_at = NULL WHERE status = ?")
+            .bind(JobStatus::Pending.to_string())
+            .bind(JobStatus::Processing.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn revert_job(&self, job_id: &str) -> Result<bool, sqlx::Error> {
@@ -434,5 +486,65 @@ impl DbManager {
             .unwrap()
             .and_utc()
             .timestamp()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn temp_db() -> (DbManager, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("video_studio_test_{}.db", uuid::Uuid::new_v4()));
+        let db = DbManager::new(path.to_str().unwrap()).await.unwrap();
+        (db, path)
+    }
+
+    #[tokio::test]
+    async fn queue_topics_backoff_and_recovery() {
+        let (db, path) = temp_db().await;
+
+        // Topic history is per profile and skips failed workflows.
+        let kids = db.create_workflow("kids_edu", "t".into()).await.unwrap();
+        db.save_topic(&kids, "Why stars twinkle".into()).await.unwrap();
+        let failed = db.create_workflow("kids_edu", "t".into()).await.unwrap();
+        db.save_topic(&failed, "Broken".into()).await.unwrap();
+        db.set_workflow_status(&failed, WorkflowStatus::Failed).await.unwrap();
+        let other = db.create_workflow("explainer", "t".into()).await.unwrap();
+        db.save_topic(&other, "How batteries work".into()).await.unwrap();
+
+        assert_eq!(db.get_recent_topics("kids_edu", 30, 10).await.unwrap(), vec!["Why stars twinkle"]);
+        assert_eq!(db.get_workflow_profile(&other).await.unwrap().as_deref(), Some("explainer"));
+
+        // A retried job waits for its backoff before it can be claimed again.
+        db.create_job(kids.clone(), agent::AgentType::Manager, agent::AgentType::Planner, "{}".into()).await.unwrap();
+        let job = db.claim_job().await.unwrap().expect("job claimable");
+        db.retry_job(&job.id, job.retry_count, "boom".into()).await.unwrap();
+        assert!(db.claim_job().await.unwrap().is_none(), "retry must wait for its backoff");
+
+        // A job left in `processing` by a crash is requeued at startup.
+        sqlx::query("UPDATE jobs SET run_after = NULL WHERE id = ?").bind(&job.id).execute(&db.pool).await.unwrap();
+        let job = db.claim_job().await.unwrap().expect("claimable after backoff");
+        assert_eq!(job.retry_count, 1);
+        assert_eq!(db.recover_interrupted_jobs().await.unwrap(), 1);
+        let job = db.claim_job().await.unwrap().expect("claimable after recovery");
+
+        // Releasing (agent pool full) keeps the retry count; failing marks the workflow failed.
+        db.release_job(&job.id).await.unwrap();
+        let job = db.claim_job().await.unwrap().unwrap();
+        assert_eq!(job.retry_count, 1);
+        db.fail_job(&job, "gave up".into()).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM workflows WHERE id = ?")
+            .bind(&kids).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(status, "failed");
+
+        db.pool.close().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn retry_delay_grows_and_caps() {
+        assert_eq!(retry_delay_secs(0), 60);
+        assert_eq!(retry_delay_secs(1), 120);
+        assert_eq!(retry_delay_secs(10), 3600);
     }
 }

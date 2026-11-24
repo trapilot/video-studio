@@ -369,14 +369,10 @@ impl ProviderManager {
                 key.daily_used += 1;
                 state.running += 1;
 
+                // Never log the key itself.
                 println!(
-                    "[{}] acquired key_index: {} | used: {} | running: {} | maximun: {} | key: {}",
-                    provider.clone().to_string(),
-                    idx,
-                    key.daily_used.clone().to_string(),
-                    state.running.clone().to_string(),
-                    state.maximum.clone().to_string(),
-                    key.credential.clone().api_key.to_string(),
+                    "[{}] acquired key #{} | used today: {} | running: {}/{}",
+                    provider, idx + 1, key.daily_used, state.running, state.maximum,
                 );
                 return Some(ProviderGuard {
                     credential,
@@ -617,11 +613,12 @@ impl ProviderGuard {
             .count_key(&self.provider)
             .await;
 
-        for _ in 0..max_keys {
+        // Use the key `acquire` already picked (and counted); rotate only when it is rate-limited.
+        let mut next = Some(self.credential.clone());
 
-            let credential = match self.manager.next_key(&self.provider).await {
-                Some(v) => v,
-                None => break,
+        for _ in 0..max_keys.max(1) {
+            let Some(credential) = next.take() else {
+                break;
             };
 
             match self.client.call(&req, &credential).await {
@@ -630,6 +627,7 @@ impl ProviderGuard {
                 },
                 Err(ProviderError::RequestExceeded { retry_after, .. }) => {
                     self.manager.block_key(&self.provider, &credential.api_key, retry_after).await;
+                    next = self.manager.next_key(&self.provider).await;
                     continue;
                 }
                 Err(e) => {

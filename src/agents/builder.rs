@@ -10,6 +10,7 @@ use crate::models::*;
 use crate::entities::*;
 use crate::provider;
 use crate::config;
+use crate::helper;
 
 
 #[derive(Debug, Clone)]
@@ -44,11 +45,9 @@ impl ShotAssets {
     }
 
     pub async fn create_dir_all(&self) -> Result<(), String> {
-        let _ = tokio::fs::create_dir_all(&self.root_path)
+        tokio::fs::create_dir_all(&self.root_path)
             .await
-            .map_err(|e| e.to_string());
-
-        Ok(())
+            .map_err(|e| format!("create {}: {}", self.root_path, e))
     }
 }
 
@@ -106,27 +105,27 @@ impl BuilderAgent {
 
                 tokio::spawn(async move {
                     let assets = ShotAssets::new(&target_path, shot.shot_id);
-                    let _ = assets.create_dir_all().await;
+                    assets.create_dir_all().await?;
 
                     let exists_image = tokio::fs::try_exists(&assets.image_path).await.unwrap_or(false);
                     let exists_audio = tokio::fs::try_exists(&assets.audio_path).await.unwrap_or(false);
                     
                     if !exists_image {
-                        let _ = text_to_image(
+                        text_to_image(
                             shot.image_prompt(profile),
                             assets.clone(),
                             config.clone(),
                             providers.clone()
-                        ).await;
+                        ).await.map_err(|e| format!("Shot {} image: {}", shot.shot_id, e))?;
                     }
 
                     if !exists_audio {
-                        let _ = text_to_audio(
+                        text_to_audio(
                             shot.dialogues.clone(),
                             assets.clone(),
                             config.clone(),
                             providers.clone()
-                        ).await;
+                        ).await.map_err(|e| format!("Shot {} audio: {}", shot.shot_id, e))?;
                     }
                     
                     let duration = get_audio_duration(&assets.audio_path).await?;
@@ -162,15 +161,30 @@ impl BuilderAgent {
 
         rendered_shots.sort_by_key(|v| v.shot_id);
         
+        if rendered_shots.is_empty() {
+            return Err("No shots to build".to_string());
+        }
+
         let transition_duration = Transition::DURATION;
-        
-        let mut cursor = 0.0;
+
+        // Each clip is padded by the transition length: speech starts after half of
+        // it (adelay) and the rest is silence. Consecutive clips overlap by
+        // `Transition::fade_between` (the same value the Renderer uses for xfade),
+        // so each clip starts where the previous one ends minus that overlap.
+        // start/end_time are when the speech is heard in the final video, for subtitles.
+        let mut clip_start = 0.0;
+        let mut prev_duration: Option<f64> = None;
         let mut clips = Vec::new();
     
         for shot in rendered_shots {
             let duration = shot.duration + transition_duration;
-            let start_time = cursor;
-            let end_time = start_time + duration;
+            // Overlap with the previous clip (none for the first one).
+            let fade = prev_duration.map(|p| Transition::fade_between(p, duration)).unwrap_or(0.0);
+            clip_start -= fade;
+            let start_time = clip_start + transition_duration / 2.0;
+            let end_time = start_time + shot.duration;
+            clip_start += duration;
+            prev_duration = Some(duration);
 
             clips.push(Clip {
                 shot_id: shot.shot_id,
@@ -181,12 +195,10 @@ impl BuilderAgent {
                 duration,
                 start_time,
                 end_time,
-                acrossfade: transition_duration,
+                acrossfade: fade,
                 transition: shot.transition,
                 motion: shot.motion,
             });
-
-            cursor = end_time;
         }
 
         Ok(Timeline {
@@ -232,11 +244,11 @@ async fn text_to_image(
         .into_bytes()
         .map_err(|e| e.to_string())?;
 
-    tokio::fs::write(&assets.image_path, image)
-        .await
-        .map_err(|e| e.to_string())?;
+    if !helper::is_image(&image) {
+        return Err(format!("Provider returned no image: {}", helper::preview(&image)));
+    }
 
-    Ok(())
+    helper::write_atomic(&assets.image_path, &image).await
 }
 
 
@@ -310,10 +322,10 @@ async fn text_to_audio(
             .args([
                 "-y",
                 "-f", "lavfi",
-                "-i", "anullsrc=r=44100:cl=stereo",
-                "-t", "5",
+                "-i", "anullsrc=r=22050:cl=mono",
+                "-t", "3",
                 "-acodec", "pcm_s16le",
-                &final_path,
+                &silent_path,
             ])
             .status()
             .await
@@ -333,16 +345,18 @@ async fn text_to_audio(
 
     let spec = first.spec();
 
+    let tmp_path = helper::part_path(&final_path);
     let mut writer = hound::WavWriter::create(
-        &final_path,
+        &tmp_path,
         spec,
     )
     .map_err(|e| e.to_string())?;
 
-    for (_, path) in audio_paths {
-        let mut reader =
-            hound::WavReader::open(path)
-                .map_err(|e| e.to_string())?;
+    for (_, path) in &audio_paths {
+        let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
+        if reader.spec() != spec {
+            return Err(format!("{} has a different WAV format than the first segment", path));
+        }
 
         for sample in reader.samples::<i16>() {
             writer
@@ -355,6 +369,11 @@ async fn text_to_audio(
 
     writer.finalize()
         .map_err(|e| e.to_string())?;
+    helper::commit_part(&final_path).await?;
+
+    for (_, path) in &audio_paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 
     Ok(())
         
@@ -372,8 +391,15 @@ async fn get_audio_duration(path: &str) -> Result<f64, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    
+    if !output.status.success() {
+        return Err(format!("ffprobe failed on {}: {}", path, String::from_utf8_lossy(&output.stderr)));
+    }
+
     let s = String::from_utf8_lossy(&output.stdout);
-    s.trim().parse::<f64>()
-        .map_err(|e| format!("Parse duration {} --> {}", path, e.to_string()))
+    let duration = s.trim().parse::<f64>()
+        .map_err(|e| format!("Parse duration {} --> {}", path, e))?;
+    if !(duration.is_finite() && duration > 0.0) {
+        return Err(format!("Audio {} has no length", path));
+    }
+    Ok(duration)
 }

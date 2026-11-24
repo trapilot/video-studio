@@ -11,7 +11,7 @@ CREATE TABLE `workflows` (
 
 CREATE TABLE IF NOT EXISTS `jobs` (
     `id` TEXT PRIMARY KEY,
-    `workflow_id` INTEGER NOT NULL,
+    `workflow_id` TEXT NOT NULL,
     `agent` TEXT NOT NULL,
     `parent` TEXT NOT NULL,
     `version` TEXT NOT NULL,
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS `jobs` (
     `retry_count` INTEGER DEFAULT 0,
     `max_retry` INTEGER DEFAULT 3,
     `locked_at` INTEGER,
+    `run_after` INTEGER,
     `threshold_at` INTEGER,
     `created_at` INTEGER NOT NULL,
     `updated_at` INTEGER NOT NULL

@@ -223,9 +223,9 @@ impl Agent for WriterAgent {
             .await
             .map_err(|e| AgentError::Execute(e.to_string()))?;
 
-        let storyboard: Storyboard =
-            serde_json::from_str(&resp)
-            .map_err(|e| AgentError::Decode(e.to_string()))?;
+        let storyboard = Storyboard::from_llm_json(&resp)
+            .map_err(AgentError::Decode)?;
+        println!("✍️  [Writer] \"{}\": {} shots", storyboard.title, storyboard.shots.len());
 
         let payload =
             serde_json::to_string(&storyboard)

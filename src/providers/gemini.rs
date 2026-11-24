@@ -62,10 +62,9 @@ impl GeminiClient {
         credential: &ApiCredential,
     ) -> Result<ProviderResponse, ProviderError> {
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
-            credential.api_key
-        );
+        // The key goes in a header, never the URL: reqwest errors include the URL,
+        // and errors end up in logs and in the jobs table.
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
         let mut payload = serde_json::json!({
             "system_instruction": {
@@ -97,14 +96,14 @@ impl GeminiClient {
 
         let res = reqwest::Client::new()
             .post(url)
+            .header("x-goog-api-key", &credential.api_key)
             .json(&payload)
             .send()
             .await
             .map_err(|e| {
-                ProviderError::Http {
-                    status: 400,
-                    body: format!("Failed to call: {}", e.to_string()),
-                    provider: self.provider().to_string(),
+                ProviderError::ClientResponse {
+                    client: self.provider().to_string(),
+                    error: e.without_url().to_string(),
                 }
             })?;
 

@@ -93,7 +93,7 @@ impl CFWorkerClient {
                     .map_err(|e| {
                         ProviderError::ClientResponse {
                             client: "CFWorker".to_string(),
-                            error: e.to_string(),
+                            error: e.without_url().to_string(),
                         }
                     })?;
 
