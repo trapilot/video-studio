@@ -201,6 +201,7 @@ On the first run, if no YouTube token is stored in the database, the studio star
 |---|---|---|
 | `STUDIO_PROFILE` | `main.rs`, `entities::active_profile` | Profile id for new productions. Default `kids_edu`. |
 | `STUDIO_DATA_DIR` | `entities::character::init` | Folder that holds `characters/<profile_id>/*.toml`. Default `./data`. |
+| `GEMINI_MODEL` | Gemini provider | Model for every Gemini key. Default `gemini-3.8-flash`. Change it when Google retires a model (error `NOT_FOUND ... no longer available`). |
 | `GEMINI_KEY_1`, `GEMINI_KEY_2`, ... | Gemini provider | Script LLM keys. Numbered from 1 with no gaps: loading stops at the first missing number. |
 | `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | Workers AI token and account id. Each key needs its own account id. |
 | `ELEVEN_LABS_KEY_n` | ElevenLabs provider | Speech fallback used by the Builder when Piper is not installed. |
@@ -239,7 +240,7 @@ Provider calls go through `ProviderManager` (`src/provider.rs`). Agents ask it f
 
 | Provider | Purpose | Used by | Model / endpoint | Keys |
 |---|---|---|---|---|
-| `Gemini` | Script LLM, JSON mode | Planner, Writer | `gemini-2.5-flash`, key sent in the `x-goog-api-key` header | `GEMINI_KEY_n`, concurrency 2 |
+| `Gemini` | Script LLM, JSON mode | Planner, Writer | `gemini-3.8-flash` (override with `GEMINI_MODEL`), key sent in the `x-goog-api-key` header | `GEMINI_KEY_n`, concurrency 2 |
 | `CFWorker` | Image generation | Builder | Cloudflare Workers AI `@cf/black-forest-labs/flux-1-schnell` | `CF_WORKER_KEY_n` + `CF_WORKER_ACCOUNT_n`, concurrency 10, 100000 requests per key per day |
 | `ElevenLabs` | Text to speech (fallback) | Builder, only when Piper is missing | `eleven_multilingual_v2`, 22.05 kHz 16-bit mono PCM wrapped as WAV | `ELEVEN_LABS_KEY_n`, concurrency 2 |
 

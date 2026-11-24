@@ -41,7 +41,7 @@ STUDIO_PROFILE=<id> cargo run   # scheduler + agents, runs forever
 
 ## Provider wiring
 
-- Script LLM: Gemini `gemini-2.5-flash` (`Provider::Gemini`), used by Planner and Writer.
+- Script LLM: Gemini `gemini-3.8-flash` (`Provider::Gemini`, `providers::gemini::DEFAULT_GEMINI_MODEL`, override with `GEMINI_MODEL`), used by Planner and Writer. All keys use the same model.
 - Image: Cloudflare Workers AI `flux-1-schnell` (`Provider::CFWorker`), used by Builder.
 - Speech: Builder checks at runtime for `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx`. Both present: local Piper. Otherwise: ElevenLabs (`Provider::ElevenLabs`, concurrency 2). `voice_id` applies in ElevenLabs mode only.
 - Registered in `AppState::build`: Gemini (2), CFWorker (10), ElevenLabs (2). Uploaders: YouTube only; `TiktokUploader` exists but is not registered.

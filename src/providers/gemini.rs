@@ -55,6 +55,21 @@ impl ProviderClient for GeminiClient {
     }
 }
 
+/// Model used when `GEMINI_MODEL` is not set. Google retires models over time;
+/// when a call fails with NOT_FOUND "no longer available", update this or set
+/// `GEMINI_MODEL`. Every key uses the same model, so output doesn't depend on
+/// which key answers (older keys may still reach retired models, newer ones not).
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3.8-flash";
+
+/// `GEMINI_MODEL` if set (e.g. "gemini-3.8-flash"), else `DEFAULT_GEMINI_MODEL`.
+pub fn model_name() -> String {
+    std::env::var("GEMINI_MODEL")
+        .ok()
+        .map(|m| m.trim().trim_start_matches("models/").to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string())
+}
+
 impl GeminiClient {
     async fn script(
         &self,
@@ -64,7 +79,10 @@ impl GeminiClient {
 
         // The key goes in a header, never the URL: reqwest errors include the URL,
         // and errors end up in logs and in the jobs table.
-        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            model_name()
+        );
 
         let mut payload = serde_json::json!({
             "system_instruction": {
@@ -121,5 +139,20 @@ impl GeminiClient {
             })?;
 
         Ok(ProviderResponse::Text(text.trim().to_string()))
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_name_defaults_and_accepts_override() {
+        std::env::remove_var("GEMINI_MODEL");
+        assert_eq!(model_name(), DEFAULT_GEMINI_MODEL);
+        std::env::set_var("GEMINI_MODEL", " models/gemini-9-pro ");
+        assert_eq!(model_name(), "gemini-9-pro");
+        std::env::set_var("GEMINI_MODEL", "");
+        assert_eq!(model_name(), DEFAULT_GEMINI_MODEL);
+        std::env::remove_var("GEMINI_MODEL");
     }
 }
