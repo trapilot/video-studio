@@ -59,7 +59,8 @@ pub struct AudioRequest {
 
 pub enum AudioFormat {
     Mp3,
-    Wav,
+    /// 16-bit mono WAV at the given sample rate.
+    Wav { sample_rate: u32 },
     Ogg,
 }
 

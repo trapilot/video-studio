@@ -123,6 +123,7 @@ impl BuilderAgent {
                         text_to_audio(
                             shot.dialogues.clone(),
                             assets.clone(),
+                            profile,
                             config.clone(),
                             providers.clone()
                         ).await.map_err(|e| format!("Shot {} audio: {}", shot.shot_id, e))?;
@@ -252,66 +253,78 @@ async fn text_to_image(
 }
 
 
+const PIPER_BIN: &str = "./tools/piper/piper";
+const PIPER_MODEL: &str = "./tools/models/en_US-lessac-medium.onnx";
+const TTS_CONCURRENCY: usize = 4;
+/// Piper's lessac-medium model and the ElevenLabs request both produce this
+/// format, so segments from either engine can be concatenated.
+const TTS_SAMPLE_RATE: u32 = 22050;
+
+/// Which speech engine the Builder uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsEngine {
+    /// Local Piper (free, offline). Used when its binary and model are installed.
+    Piper,
+    /// ElevenLabs API through the provider manager. Fallback when Piper is missing.
+    ElevenLabs,
+}
+
+impl TtsEngine {
+    /// Piper if both its binary and model exist, otherwise ElevenLabs.
+    /// Logged once per process so the choice is visible at the first shot.
+    pub fn detect() -> Self {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+
+        let piper_ok = std::path::Path::new(PIPER_BIN).is_file()
+            && std::path::Path::new(PIPER_MODEL).is_file();
+        let engine = if piper_ok { TtsEngine::Piper } else { TtsEngine::ElevenLabs };
+
+        LOGGED.call_once(|| match engine {
+            TtsEngine::Piper => println!("🔊 [Builder] Speech: Piper ({})", PIPER_MODEL),
+            TtsEngine::ElevenLabs => println!(
+                "🔊 [Builder] Speech: Piper not found ({} / {}), falling back to ElevenLabs",
+                PIPER_BIN, PIPER_MODEL
+            ),
+        });
+        engine
+    }
+}
+
 async fn text_to_audio(
     dialogues: Vec<Dialogue>,
     assets: ShotAssets,
-    _config: Arc<config::Config>,
-    _providers: Arc<provider::ProviderManager>,
+    profile: &'static StudioProfile,
+    config: Arc<config::Config>,
+    providers: Arc<provider::ProviderManager>,
 ) -> Result<(), String> {
-    const MODEL: &str = "./tools/models/en_US-lessac-medium.onnx";
-    const PIPER_BIN: &str = "./tools/piper/piper";
-    const PIPER_CONCURRENCY: usize = 4;
-
-    // println!("cwd: {:?}", std::env::current_dir());
-    // println!("piper exists: {}", std::path::Path::new(PIPER_BIN).exists());
-    // println!("model exists: {}", std::path::Path::new(MODEL).exists());
-
+    let engine = TtsEngine::detect();
     let final_path = assets.audio_path.clone();
     let root_path = assets.root_path.clone();
 
     let mut audio_paths: Vec<(usize, String)> =
         futures::stream::iter(dialogues.into_iter().enumerate())
             .map(|(i, dialogue)| {
-                let text = dialogue.text.clone();
                 let segment_path = format!("{}/audio.part_{i}.wav", root_path);
+                let config = config.clone();
+                let providers = providers.clone();
 
                 async move {
-                    let mut child = tokio::process::Command::new(PIPER_BIN)
-                        .args([
-                            "--model", MODEL,
-                            "--output_file",
-                            &segment_path,
-                        ])
-                        .stdin(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .spawn()
-                        .map_err(|e| format!("Piper spawn failed: {e}"))?;
-
-                    if let Some(mut stdin) = child.stdin.take() {
-                        tokio::io::AsyncWriteExt::write_all(
-                            &mut stdin,
-                            text.as_bytes(),
-                        )
-                        .await
-                        .map_err(|e| format!("Piper stdin failed: {e}"))?;
+                    match engine {
+                        TtsEngine::Piper => piper_tts(&dialogue.text, &segment_path).await?,
+                        TtsEngine::ElevenLabs => {
+                            // The speaker's own voice if the character file sets one.
+                            let voice = profile
+                                .character(&dialogue.character)
+                                .and_then(|c| c.voice())
+                                .unwrap_or(&config.voice.base_voice)
+                                .to_string();
+                            elevenlabs_tts(&dialogue.text, voice, &config, &providers, &segment_path).await?
+                        }
                     }
-
-                    let output = child
-                        .wait_with_output()
-                        .await
-                        .map_err(|e| format!("Piper wait failed: {e}"))?;
-
-                    if !output.status.success() {
-                        return Err(format!(
-                            "Piper synthesis failed: {}",
-                            String::from_utf8_lossy(&output.stderr)
-                        ));
-                    }
-
                     Ok::<_, String>((i, segment_path))
                 }
             })
-            .buffer_unordered(PIPER_CONCURRENCY)
+            .buffer_unordered(TTS_CONCURRENCY)
             .try_collect()
             .await?;
 
@@ -402,4 +415,64 @@ async fn get_audio_duration(path: &str) -> Result<f64, String> {
         return Err(format!("Audio {} has no length", path));
     }
     Ok(duration)
+}
+async fn piper_tts(text: &str, segment_path: &str) -> Result<(), String> {
+    let mut child = tokio::process::Command::new(PIPER_BIN)
+        .args(["--model", PIPER_MODEL, "--output_file", segment_path])
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Piper spawn failed: {e}"))?;
+
+    // Dropping stdin at the end of this block closes it, so Piper sees EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::io::AsyncWriteExt::write_all(&mut stdin, text.as_bytes())
+            .await
+            .map_err(|e| format!("Piper stdin failed: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("Piper wait failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("Piper synthesis failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(())
+}
+
+async fn elevenlabs_tts(
+    text: &str,
+    voice_id: String,
+    config: &config::Config,
+    providers: &provider::ProviderManager,
+    segment_path: &str,
+) -> Result<(), String> {
+    let req = provider::ProviderRequest::Audio(provider::AudioRequest {
+        text: text.to_string(),
+        voice_id: Some(voice_id),
+        language: None,
+        speed: Some(config.tts.speed),
+        stability: Some(config.tts.stability),
+        similarity_boost: Some(config.tts.similarity_boost),
+        format: Some(provider::AudioFormat::Wav { sample_rate: TTS_SAMPLE_RATE }),
+    });
+
+    let guard = providers
+        .acquire(&provider::Provider::ElevenLabs)
+        .await
+        .ok_or_else(|| "ElevenLabs unavailable: Piper is not installed and no ELEVEN_LABS_KEY_n is set (or all keys are blocked)".to_string())?;
+
+    let wav = guard
+        .call(req)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_bytes()
+        .map_err(|e| e.to_string())?;
+
+    if !wav.starts_with(b"RIFF") {
+        return Err(format!("ElevenLabs returned no WAV audio: {}", helper::preview(&wav)));
+    }
+    helper::write_atomic(segment_path, &wav).await
 }
