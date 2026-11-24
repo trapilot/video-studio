@@ -51,14 +51,15 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 ## State and resume semantics
 
 - State is the `jobs` and `workflows` tables in `data_history.db`. A job payload is the JSON of the previous agent's output; handoff is `db.handoff_job`.
-- Failure: `AgentPool` calls `retry_job` (backoff via `jobs.run_after`, 60 s doubling to 1 h, `db::retry_delay_secs`) while `retry_count < max_retry` (3), then `fail_job` (job and workflow `failed`).
+- Failure: `AgentPool` calls `retry_job` (backoff via `jobs.run_after`, 60 s doubling to 1 h, `db::retry_delay_secs`) while `agent::should_retry` allows it (`max_retry` = 3 total attempts), then `fail_job` (job and workflow `failed`).
 - Startup: `recover_interrupted_jobs` requeues jobs left `processing`.
 - The Cleaner marks the workflow `completed`.
 - `APP_VERSION` (`src/db.rs`) filters which jobs are claimed and counted busy. Bump it after an incompatible payload change so old jobs are ignored.
 - The schema (`migrations/schema_01.sql`) is applied only when the DB file is created. The project is not deployed, so change the schema by editing `schema_01.sql` and deleting your local `data_history.db`.
 - New fields on payload structs should be `Option<T>` or `#[serde(default)]` so queued jobs still decode.
 - Assets are idempotent: Builder skips existing `shot_N/image.png` and `audio.wav`; Renderer skips existing `shot_N/video.mp4` and `final_video.mp4`. Delete them to force regeneration.
-- Output path: `./output/{YYYYMMDD}/{workflow_id}/` (`Job::workflow_path`).
+- Output path: `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`, dated by the workflow's creation, local time). The Cleaner deletes intermediates after publishing unless `cleanup.keep_intermediates`.
+- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per workflow) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`).
 
 ## Conventions
 
@@ -72,7 +73,7 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 - Check provider bytes before saving (`helper::is_image`).
 - Logs are emoji-prefixed `println!` per agent (`🧠 [Planner]`, `✍️  [Writer]`, `🔧 [Builder]`, `🎥 [Renderer]`, `📤 [Publisher]`, `📤 [Cleaner]`). Match that.
 - LLM-facing enums (`Motion`, `Transition`, `Position`) need an `ALL` entry, `strum` lowercase `Display`/`FromStr`, and serde lowercase. The Writer prompt is built from `ALL`.
-- Do not modify `src/`, run real uploads or `cargo run` unless the user asks.
+- Do not run real uploads or `cargo run` unless the user asks.
 
 ## Skills
 
