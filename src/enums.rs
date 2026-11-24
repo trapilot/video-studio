@@ -29,7 +29,7 @@ impl std::fmt::Display for AgentNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
     Image,
     Video,
@@ -70,21 +70,25 @@ impl Motion {
         Motion::DollyOut,
     ];
 
-    pub fn ffmpeg_filter(&self, duration: f64) -> Option<String> {
-        let frames = (duration * 25.0) as u32;
-
-        match self {
-            Motion::None => None,
-            Motion::ZoomIn => Some(format!("zoompan=z='min(zoom+0.001,1.3)':d={}", frames)),
-            Motion::ZoomOut => Some(format!("zoompan=z='max(1.0,1.3-on*0.001)':d={}", frames)),
-            Motion::PanLeft => Some(format!("zoompan=x='iw/2-(on*2)':z=1.1:d={}", frames)),
-            Motion::PanRight => Some(format!("zoompan=x='on*2':z=1.1:d={}", frames)),
-            Motion::PanUp => Some(format!("zoompan=y='ih/2-(on*2)':z=1.1:d={}", frames)),
-            Motion::PanDown => Some(format!("zoompan=y='on*2':z=1.1:d={}", frames)),
-            Motion::KenBurns => Some(format!("zoompan=z='min(zoom+0.0005,1.2)':x='on':y='on':d={}", frames)),
-            Motion::DollyIn => Some(format!("zoompan=z='min(zoom+0.001,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={}", frames)),
-            Motion::DollyOut => Some(format!("zoompan=z='max(1.0,1.5-on*0.002)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={}", frames)),
-        }
+    /// `zoompan` filter that animates one still image for `frames` frames at the
+    /// given output size and fps. The input must already be scaled/cropped to `w`x`h`.
+    /// Every motion (including `None`) returns a filter, so all clips share size and fps.
+    pub fn ffmpeg_filter(&self, frames: u32, w: u32, h: u32, fps: u32) -> String {
+        let motion = match self {
+            Motion::None => "z=1".to_string(),
+            Motion::ZoomIn => "z='min(zoom+0.001,1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'".to_string(),
+            Motion::ZoomOut => "z='max(1.0,1.3-on*0.001)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'".to_string(),
+            Motion::PanLeft => "z=1.1:x='(iw-iw/zoom)*(1-on/FRAMES)':y='ih/2-(ih/zoom/2)'".to_string(),
+            Motion::PanRight => "z=1.1:x='(iw-iw/zoom)*on/FRAMES':y='ih/2-(ih/zoom/2)'".to_string(),
+            Motion::PanUp => "z=1.1:x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(1-on/FRAMES)'".to_string(),
+            Motion::PanDown => "z=1.1:x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*on/FRAMES'".to_string(),
+            Motion::KenBurns => "z='min(zoom+0.0005,1.2)':x='(iw-iw/zoom)*on/FRAMES':y='(ih-ih/zoom)*on/FRAMES'".to_string(),
+            Motion::DollyIn => "z='min(zoom+0.001,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'".to_string(),
+            Motion::DollyOut => "z='max(1.0,1.5-on*0.002)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'".to_string(),
+        };
+        // Pans move across the whole frame over the clip, whatever its length.
+        let motion = motion.replace("FRAMES", &frames.max(1).to_string());
+        format!("zoompan={}:d={}:s={}x{}:fps={}", motion, frames.max(1), w, h, fps)
     }
 }
 impl std::fmt::Display for Motion {

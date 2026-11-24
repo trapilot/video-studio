@@ -3,28 +3,38 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 use crate::db::DbManager;
-use crate::enums::*;
 use crate::models::*;
 use crate::helper::*;
+use crate::profiles::StudioProfile;
 use crate::workflow;
 
 
 pub async fn run_scheduler(
     client: reqwest::Client,
     db: Arc<DbManager>,
+    profile: &'static StudioProfile,
 ) {
     let app_debug = "True" == env::var("APP_DEBUG").unwrap_or_else(|_| "False".to_string());
 
     loop {
         let mut state = match db.get_recent_state().await {
             Ok(Some(s)) => s,
-            Ok(None) => VideoState::new(),
+            // An unfinished session keeps the profile it was started with, even if
+            // STUDIO_PROFILE has changed since; the new profile applies to the next session.
+            Ok(None) => VideoState::new(profile),
             Err(e) => {
                 eprintln!("DB error, wait 30 minutes to retry: {}", e);
                 sleep(Duration::from_mins(30)).await;
                 continue;
             }
         };
+
+        // A session whose profile was removed from PROFILES can never succeed.
+        if let Err(e) = state.profile() {
+            eprintln!("⛔ {} | session: {}, cancelling", e, state.session_id);
+            let _ = db.save_state(state.cancelled()).await;
+            continue;
+        }
 
         if state.meta.retry_count >= state.meta.max_retry {
             println!(
@@ -73,7 +83,7 @@ pub async fn run_scheduler(
         match result {
             Ok(artifact) => {
                 let _ = db.save_state(&state.done()).await;
-                let _ = db.save_topic(state.target_age.clone(), &state.target_topic).await;
+                let _ = db.save_topic(&state.profile_id, &state.target_topic).await;
  
                 println!("✅ OK: {}, Updated into long-term memory", artifact.title);
                 sleep(Duration::from_mins(10)).await;
@@ -81,14 +91,17 @@ pub async fn run_scheduler(
 
             Err(e) => {
                 println!("🛑 ERR: {}", e);
-                // 🔥 exponential backoff
-                let next_backoff = next_backoff(state.meta.backoff_ms as u64);
+                // Exponential backoff: the ceiling doubles per failure (reset on success).
+                state.meta.backoff_ms = next_backoff(state.meta.backoff_ms.max(0) as u64) as i32;
+                let delay = jitter(state.meta.backoff_ms as u64);
 
-                let _ = db.save_state(&state.retry(e)).await;
+                if let Err(db_err) = db.save_state(state.retry(e)).await {
+                    eprintln!("🔴 Failed to save state: {}", db_err);
+                }
 
-                if state.meta.retry_count <= state.meta.max_retry {
-                    println!("🔁 Retry in {}ms", next_backoff);
-                    sleep(Duration::from_millis(next_backoff)).await;
+                if state.meta.retry_count < state.meta.max_retry {
+                    println!("🔁 Retry in {}ms", delay);
+                    sleep(Duration::from_millis(delay)).await;
                 }
             }
         }

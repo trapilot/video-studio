@@ -1,20 +1,21 @@
 use serde::Deserialize;
 
+/// Studio-wide technical settings. What to produce (format, audience, language,
+/// publish metadata) lives in the per-video-type profiles in `src/profiles.rs`.
 #[derive(Debug)]
 pub struct Config {
-    pub movie: MovieConfig,
+    pub video: VideoConfig,
     pub voice: VoiceConfig,
     pub tts: TtsConfig,
     pub feature: FeatureConfig,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MovieConfig {
-    pub language: &'static str,
-    pub country: &'static str,
-    pub default_description: &'static str,
-    pub default_tags: [&'static str; 5],
-    pub youtube_category: &'static str,
+pub struct VideoConfig {
+    /// Output frame size. Every scene is scaled and center-cropped to it.
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,15 +39,15 @@ pub struct FeatureConfig {
 }
 
 pub static CONFIG: Config = Config {
-    movie: MovieConfig {
-        language: "English", // Vietnamese
-        country: "Vietnam",
-        default_description: "An AI-generated educational short movie",
-        default_tags: ["ai movie", "english", "vietnamese", "education", "children"],
-        youtube_category: "27",
+    // Vertical 9:16 for YouTube Shorts and TikTok.
+    video: VideoConfig {
+        width: 1080,
+        height: 1920,
+        fps: 25,
     },
-    
+
     voice: VoiceConfig {
+        // Fallback ElevenLabs voice: narrator voice and any speaker without its own voice_id.
         base_voice: "pNInz6obpgDQGcFmaJgB",
         default_gender: "female",
     },

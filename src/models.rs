@@ -1,10 +1,11 @@
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 
-use crate::config::CONFIG;
+use crate::profiles::*;
 use crate::helper::*;
 use crate::enums::*;
 
+/// A recurring on-screen character. Casts are defined per profile in `src/profiles.rs`.
 #[derive(Debug, Clone)]
 pub struct Character {
     pub enabled: bool,
@@ -34,120 +35,6 @@ pub struct Character {
     pub personality_prompt: &'static str,
 }
 
-pub const EDU_CHARACTERS: &[Character] = &[
-    Character {
-        enabled: true,
-        spotlight: true,
-
-        name: "Quốc Khánh",
-        nickname: "Bin",
-        voice_id: &CONFIG.voice.base_voice,
-        birth_year: 2020,
-
-        role: "Protagonist",
-        family_role: "child",
-        story_function: "Main protagonist who initiates most adventures and learning experiences.",
-
-        profession: "Student",
-        topic_domain: "Curiosity, Exploration, Everyday Learning",
-
-        catchphrase: "I want to try it!",
-        speaking_style: "Very energetic, speaks quickly, asks many 'why' questions, expresses excitement openly.",
-        visual_anchor: "a 3D Pixar style illustration of a cute Vietnamese boy age 6, short black hair, bright curious eyes, yellow t-shirt, blue shorts, energetic pose, white background",
-
-        strengths: "Curious, brave, friendly, imaginative, willing to help others.",
-        weaknesses: "Impulsive, impatient, easily distracted, sometimes acts before thinking.",
-        core_values: "Curiosity, friendship, courage, kindness.",
-
-        relationship_prompt: "Bin is the son of Nam and Diem Suong. He is the best friend of Hoang Yen. Hoang Yen often helps and protects him when he gets into trouble.",
-        personality_prompt: "A lively and energetic Vietnamese boy who loves exploring everything around him and learning through adventure.",
-    },
-
-    Character {
-        enabled: true,
-        spotlight: false,
-
-        name: "Hoàng Yến",
-        nickname: "Yến",
-        voice_id: &CONFIG.voice.base_voice, // Bella
-        birth_year: 2020,
-
-        role: "Best Friend",
-        family_role: "friend",
-        story_function: "Voice of reason and emotional support for Bin.",
-
-        profession: "Student",
-        topic_domain: "Learning, Friendship, Kindness",
-
-        catchphrase: "Để mình giúp nhé!",
-        speaking_style: "Gentle, polite, calm, encouraging and supportive.",
-        visual_anchor: "a 3D Pixar style illustration of a cute Vietnamese girl age 6, long black hair with pink ribbons, pink dress, holding books, warm smile, white background",
-        
-        strengths: "Intelligent, hardworking, loyal, responsible, brave when protecting friends.",
-        weaknesses: "Can worry too much, dislikes conflict, sometimes overthinks.",
-        core_values: "Kindness, friendship, honesty, responsibility.",
-        
-        relationship_prompt: "Hoang Yen is Bin's classmate and best friend. She often helps him solve problems and stands up for him when needed.",
-        personality_prompt: "A sweet and intelligent girl who loves learning and always supports her friends.",
-    },
-
-    Character {
-        enabled: true,
-        spotlight: false,
-
-        name: "Nam",
-        nickname: "Ba Nam",
-        voice_id: &CONFIG.voice.base_voice,
-        birth_year: 1990,
-
-        role: "Father",
-        family_role: "father",
-        story_function: "Mentor figure who explains concepts and guides Bin's learning.",
-
-        profession: "Software Engineer",
-        topic_domain: "Technology, Logic, Problem Solving",
-
-        catchphrase: "What do you think about this?",
-        speaking_style: "Calm, logical, patient, explains things step by step.",
-        visual_anchor: "a 3D Pixar style illustration of a friendly Vietnamese father in his mid 30s, glasses, polo shirt, holding a laptop, white background",
-
-        strengths: "Wise, patient, analytical, dependable.",
-        weaknesses: "Perfectionist, strict with rules, sometimes too serious.",
-        core_values: "Responsibility, honesty, critical thinking, discipline.",
-
-        relationship_prompt: "Nam is Bin's father and Diem Suong's husband. Bin often asks him questions about the world.",
-        personality_prompt: "A thoughtful software engineer who enjoys teaching children how things work.",
-    },
-
-    Character {
-        enabled: true,
-        spotlight: false,
-
-        name: "Diễm Sương",
-        nickname: "Mẹ Sương",
-        voice_id: &CONFIG.voice.base_voice,
-        birth_year: 1993,
-
-        role: "Mother",
-        family_role: "mother",
-        story_function: "Emotional anchor of the family and teacher of life lessons.",
-
-        profession: "Elementary School Teacher",
-        topic_domain: "Education, Family, Life Skills",
-
-        catchphrase: "Listen to me!",
-        speaking_style: "Warm, caring, nurturing, occasionally firm when teaching lessons.",
-        visual_anchor: "a 3D Pixar style illustration of a gentle Vietnamese mother in her early 30s, long black hair, pastel blouse, holding a book and cooking spoon, warm smile, white background",
-
-        strengths: "Patient, loving, organized, empathetic.",
-        weaknesses: "Can become worried easily, sometimes overprotective.",
-        core_values: "Family, respect, kindness, good habits.",
-        
-        relationship_prompt: "Diem Suong is Bin's mother and Nam's wife. She helps Bin learn responsibility and good behavior.",
-        personality_prompt: "A caring elementary school teacher who loves her family and wants children to grow into kind people.",
-    },
-];
-
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct WorkflowMeta {
     pub status: String, // running | cooldown | failed | done | cancelled
@@ -160,7 +47,8 @@ pub struct WorkflowMeta {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct VideoState {
-    pub target_age: u8,
+    /// Id of the `StudioProfile` this session was started with.
+    pub profile_id: String,
     pub target_path: String,
     pub target_topic: String,
     pub main_character: String,
@@ -180,20 +68,24 @@ pub struct VideoState {
     pub tiktok_uploaded: bool,
 }
 impl VideoState {
-    pub fn new() -> Self {
-        let target_char = EDU_CHARACTERS.first().unwrap();
-        let target_age = now_age(target_char.birth_year) as u8;
+    /// The profile this session was started with. Errors if it was removed from `PROFILES`.
+    pub fn profile(&self) -> Result<&'static StudioProfile, String> {
+        profile_by_id(&self.profile_id)
+            .ok_or_else(|| format!("Session uses unknown profile '{}'", self.profile_id))
+    }
+
+    pub fn new(profile: &StudioProfile) -> Self {
         let session_id = Uuid::new_v4().to_string();
         let target_path = format!(
             "./output/{}_{}/{}",
             now_ymd(),
-            left_pad(target_age as u32, 3),
+            profile.id,
             session_id,
         );
         
         Self {
             session_id,
-            target_age,
+            profile_id: profile.id.to_string(),
             target_path,
             target_topic: "".into(),
             current_node: AgentNode::Planner,
@@ -211,15 +103,11 @@ impl VideoState {
                 status: "running".into(),
                 retry_count: 0,
                 max_retry: 3,
-                backoff_ms: 1000,
+                backoff_ms: BASE_BACKOFF_MS as i32,
                 last_error: None,
-                updated_at: chrono::Local::now().to_string(),
+                updated_at: now_rfc(),
             },
         }
-    }
-
-    pub fn is_finished(&self) -> bool {
-        return self.meta.status == "done" || self.meta.status == "cancelled"
     }
 
     pub fn done(&mut self) -> &Self {
@@ -252,6 +140,7 @@ impl VideoState {
     pub fn reset(&mut self) -> &Self {
         self.meta.updated_at = now_rfc();
         self.meta.retry_count = 0;
+        self.meta.backoff_ms = BASE_BACKOFF_MS as i32;
         self.meta.last_error = None;
         self.meta.status = "running".into();
         self
@@ -295,7 +184,10 @@ pub struct VoiceSegment {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Scene {
     pub scene_id: u8,
-    pub duration: u8,
+    /// The Writer's estimate in seconds. Informational only: the real scene
+    /// length is measured from the generated audio.
+    #[serde(default)]
+    pub duration: f64,
     pub motion: String,
     pub transition: String,
     pub visual_prompt: String,

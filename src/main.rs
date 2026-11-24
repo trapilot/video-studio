@@ -3,6 +3,7 @@ mod api;
 mod enums;
 mod config;
 mod models;
+mod profiles;
 mod helper;
 mod workflow;
 mod renderer;
@@ -17,12 +18,14 @@ use crate::db::DbManager;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let client = reqwest::Client::new();
-    let db = Arc::new(DbManager::new("data_history.db"));
+    let profile = profiles::active_profile()?;
 
-    println!("🚀 Sentinel System v1.0 - AI Video Engine Startup");
+    let client = reqwest::Client::new();
+    let db = Arc::new(DbManager::new("data_history.db")?);
+
+    println!("🚀 Video Studio v{} | profile: {} ({})", env!("CARGO_PKG_VERSION"), profile.id, profile.name);
     
-    scheduler::run_scheduler(client, db).await;
+    scheduler::run_scheduler(client, db, profile).await;
 
     Ok(())
 }

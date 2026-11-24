@@ -2,6 +2,8 @@ use std::env;
 
 use reqwest::Client;
 
+use super::{read_bytes, send_err};
+
 pub async fn generate_tts(
     client: &Client,
     text: &str,
@@ -21,7 +23,7 @@ let voice =
             <voice name='{}'>{}</voice>
         </speak>
         "#,
-        voice, text
+        voice, xml_escape(text)
     );
 
     let res = client
@@ -38,13 +40,16 @@ let voice =
         .body(ssml)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("Edge TTS", e))?;
 
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?
-        .to_vec();
+    read_bytes(res, "Edge TTS").await
+}
 
-    Ok(bytes)
+/// SSML is XML: escape user text so `&`, `<` etc. don't break the request.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }

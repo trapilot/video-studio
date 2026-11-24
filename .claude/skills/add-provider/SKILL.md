@@ -14,9 +14,9 @@ Providers are separate from workflow logic (AGENTS.md principle 3). Workflow arm
    - Image: `pub async fn generate_image(client: &Client, prompt: &str) -> Result<Vec<u8>, String>`
    - TTS: `pub async fn generate_tts(client: &Client, text: &str, voice: &str) -> Result<Vec<u8>, String>`
 3. Read the key with `env::var("X_API_KEY").map_err(|_| "Missing X_API_KEY")?` and add it to `.env.example`.
-4. Check `response.status()` and put the response body in the error string. Never `unwrap()`.
+4. Parse responses with `super::read_json(res, "Name")` or `super::read_bytes` (non-2xx becomes an `Err` with the body) and map send errors with `super::send_err` (drops the URL). Never `unwrap()`. Send keys in headers, never in the URL.
 5. Switch the call site in `src/renderer.rs`: `build_content` (LLM), `generate_scene_visual` (image), or `generate_scene_audio` (TTS).
-6. Callers run `detect_media` on the bytes. For a new format, extend `helper::detect_media`.
+6. Callers check the bytes with `helper::expect_media`. For a new format, extend `helper::detect_media`.
 7. `cargo check`.
 
 ## Reference implementations

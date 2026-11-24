@@ -4,6 +4,8 @@ use base64::Engine;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::{read_json, send_err};
+
 pub async fn generate_image(
     client: &Client,
     prompt: &str,
@@ -23,16 +25,14 @@ pub async fn generate_image(
         "num_steps": 4      // Schnell only needs 4 steps
     });
     
-    let res: Value = client
+    let res = client
         .post(&url)
         .bearer_auth(api_token)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("Cloudflare", e))?;
+    let res: Value = read_json(res, "Cloudflare").await?;
 
     let image_b64 = res["result"]["image"]
         .as_str()

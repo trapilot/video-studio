@@ -4,6 +4,8 @@ use base64::Engine;
 use reqwest::Client;
 use serde_json::{json, Value};
 
+use super::{read_json, send_err};
+
 pub async fn generate_script(
     client: &Client,
     system: &str,
@@ -15,10 +17,7 @@ pub async fn generate_script(
         env::var("GEMINI_API_KEY")
             .map_err(|_| "Missing GEMINI_API_KEY")?;
 
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
-        api_key
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
     let mut payload = json!({
         "system_instruction": {
@@ -41,15 +40,15 @@ pub async fn generate_script(
             json!("application/json");
     }
 
-    let res: Value = client
+    // The key goes in a header, not the URL, so it never shows up in error messages.
+    let res = client
         .post(url)
+        .header("x-goog-api-key", &api_key)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("Gemini", e))?;
+    let res: Value = read_json(res, "Gemini").await?;
 
     res["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
@@ -66,10 +65,7 @@ pub async fn generate_tts(
         env::var("GEMINI_API_KEY")
             .map_err(|_| "Missing GEMINI_API_KEY")?;
 
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={}",
-        api_key
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
 
     let payload = json!({
         "contents": [{
@@ -82,15 +78,15 @@ pub async fn generate_tts(
         }
     });
 
-    let res: Value = client
+    // The key goes in a header, not the URL, so it never shows up in error messages.
+    let res = client
         .post(url)
+        .header("x-goog-api-key", &api_key)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("Gemini", e))?;
+    let res: Value = read_json(res, "Gemini").await?;
 
     let audio_b64 =
         res["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
@@ -114,10 +110,7 @@ pub async fn generate_image(
         env::var("GEMINI_API_KEY")
             .map_err(|_| "Missing GEMINI_API_KEY")?;
 
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key={}",
-        api_key
-    );
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent";
 
     let payload = json!({
         "contents": [{
@@ -130,15 +123,15 @@ pub async fn generate_image(
         }
     });
 
-    let res: Value = client
+    // The key goes in a header, not the URL, so it never shows up in error messages.
+    let res = client
         .post(url)
+        .header("x-goog-api-key", &api_key)
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("Gemini", e))?;
+    let res: Value = read_json(res, "Gemini").await?;
 
     let image_b64 = res["candidates"][0]["content"]["parts"]
         .as_array()

@@ -27,8 +27,13 @@ pub async fn generate_image(
         .ok_or_else(|| format!("No request_id: {}", submit))?
         .to_string();
 
-    // Poll result
+    // Poll result (give up after ~2 minutes so a stuck job can't hang the pipeline)
+    let mut attempts = 0;
     loop {
+        attempts += 1;
+        if attempts > 240 {
+            return Err(format!("Fal job {} timed out", request_id));
+        }
         let result: Value = client
             .get(format!("https://queue.fal.run/fal-ai/flux/schnell/requests/{}/status", request_id))
             .header("Authorization", format!("Key {}", api_key))

@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde_json::json;
 
 use crate::config::CONFIG;
+use super::{read_bytes, send_err};
 
 pub async fn generate_tts(
     client: &Client,
@@ -34,15 +35,7 @@ pub async fn generate_tts(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| send_err("ElevenLabs", e))?;
 
-    if !res.status().is_success() {
-        let err = res.text().await.unwrap_or_default();
-        return Err(format!("ElevenLabs error: {}", err));
-    }
-
-    res.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| e.to_string())
+    read_bytes(res, "ElevenLabs").await
 }
