@@ -13,7 +13,16 @@ impl ProviderClient for GeminiClient {
     ) -> Result<ProviderResponse, ProviderError> {
         match req {
             ProviderRequest::Script(req) => {
-                self.script(req, credential).await
+                let primary = model_name();
+                match self.script(req, credential, &primary).await {
+                    // Main model overloaded: try the fallback model once, if configured.
+                    Err(ProviderError::Unavailable { .. }) if fallback_model_name().is_some_and(|f| f != primary) => {
+                        let fallback = fallback_model_name().unwrap_or_default();
+                        println!("⏳ [gemini] {} overloaded, trying fallback model {}", primary, fallback);
+                        self.script(req, credential, &fallback).await
+                    }
+                    other => other,
+                }
             },
 
             _ => Err(ProviderError::NotSupported(Self.provider().to_string())),
@@ -26,9 +35,21 @@ impl ProviderClient for GeminiClient {
         body: &str,
     ) -> bool {
         status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || body.contains("UNAVAILABLE")
+            || body.contains("RESOURCE_EXHAUSTED")
             || body.contains("quota")
-            || body.contains("experiencing high demand")
+    }
+
+    /// "This model is currently experiencing high demand" (503 UNAVAILABLE) is a
+    /// model-wide overload, not a per-key limit.
+    fn is_transient_error(
+        &self,
+        status: u16,
+        body: &str,
+    ) -> bool {
+        matches!(status, 500 | 502 | 503 | 504)
+            || body.contains("UNAVAILABLE")
+            || body.contains("high demand")
+            || body.contains("overloaded")
     }
     
     fn is_auth_error(
@@ -70,18 +91,27 @@ pub fn model_name() -> String {
         .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string())
 }
 
+/// Optional `GEMINI_FALLBACK_MODEL`, used when the main model is overloaded.
+pub fn fallback_model_name() -> Option<String> {
+    std::env::var("GEMINI_FALLBACK_MODEL")
+        .ok()
+        .map(|m| m.trim().trim_start_matches("models/").to_string())
+        .filter(|m| !m.is_empty())
+}
+
 impl GeminiClient {
     async fn script(
         &self,
         req: &ScriptRequest,
         credential: &ApiCredential,
+        model: &str,
     ) -> Result<ProviderResponse, ProviderError> {
 
         // The key goes in a header, never the URL: reqwest errors include the URL,
         // and errors end up in logs and in the jobs table.
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-            model_name()
+            model
         );
 
         let mut payload = serde_json::json!({
@@ -144,6 +174,17 @@ impl GeminiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_demand_is_transient_not_quota() {
+        let body = r#"{"error":{"code":503,"message":"This model is currently experiencing high demand.","status":"UNAVAILABLE"}}"#;
+        let err = GeminiClient.ensure_success(reqwest::StatusCode::SERVICE_UNAVAILABLE, body).unwrap_err();
+        assert!(matches!(err, ProviderError::Unavailable { .. }), "{:?}", err);
+
+        let quota = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#;
+        let err = GeminiClient.ensure_success(reqwest::StatusCode::TOO_MANY_REQUESTS, quota).unwrap_err();
+        assert!(matches!(err, ProviderError::RequestExceeded { .. }), "{:?}", err);
+    }
 
     #[test]
     fn model_name_defaults_and_accepts_override() {

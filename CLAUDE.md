@@ -59,7 +59,7 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 - New fields on payload structs should be `Option<T>` or `#[serde(default)]` so queued jobs still decode.
 - Assets are idempotent: Builder skips existing `shot_N/image.png` and `audio.wav`; Renderer skips existing `shot_N/video.mp4` and `final_video.mp4`. Delete them to force regeneration.
 - Output path: `./output/{YYYYMMDD}/{production_id}/` (`db.production_output_path`, dated by the production's creation, local time). The Cleaner deletes intermediates after publishing unless `cleanup.keep_intermediates`.
-- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per production) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`).
+- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per production) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`); temporary overload (`Unavailable`, 5xx) is retried in place without blocking keys.
 
 ## Conventions
 

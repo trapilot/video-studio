@@ -95,6 +95,11 @@ pub enum ProviderError {
     #[error("[{provider}] Key cannot serve this request --> {body}")]
     KeyRejected { provider: String, body: String },
 
+    /// The service is temporarily overloaded or down (5xx, "UNAVAILABLE").
+    /// Not tied to a key: every key gets the same answer, so retry later instead.
+    #[error("[{provider}] Provider temporarily unavailable --> {body}")]
+    Unavailable { provider: String, body: String },
+
     #[error("[{0}] Provider all keys exhausted")]
     AllKeysExhausted(String),
 
@@ -112,6 +117,16 @@ pub enum ProviderError {
 
     #[error("[{client}] Provider client response error {error}")]
     ClientResponse { client: String, error: String },
+}
+
+/// In-call retries for `Unavailable` before the error goes back to the agent
+/// (whose job is then retried with the queue's longer backoff).
+const TRANSIENT_RETRIES: u32 = 3;
+
+/// 2 s, 4 s, 8 s (milliseconds in tests).
+fn transient_backoff(attempt: u32) -> std::time::Duration {
+    let base_ms: u64 = if cfg!(test) { 5 } else { 2_000 };
+    std::time::Duration::from_millis(base_ms << attempt.min(5))
 }
 
 /// How long a key that can't serve a request (`KeyRejected`) is skipped.
@@ -191,6 +206,11 @@ pub trait ProviderClient: Send + Sync {
         false
     }
 
+    /// Temporary service-side failures (see `ProviderError::Unavailable`).
+    fn is_transient_error(&self, status: u16, _body: &str) -> bool {
+        matches!(status, 500 | 502 | 503 | 504)
+    }
+
     async fn read_json<T>(
         &self,
         res: reqwest::Response,
@@ -245,6 +265,13 @@ pub trait ProviderClient: Send + Sync {
 
         if self.is_auth_error(code, body) {
             return Err(ProviderError::RequestUnauthorized {
+                provider: self.provider().to_string(),
+                body: body.to_string(),
+            });
+        }
+
+        if self.is_transient_error(code, body) {
+            return Err(ProviderError::Unavailable {
                 provider: self.provider().to_string(),
                 body: body.to_string(),
             });
@@ -655,13 +682,28 @@ impl ProviderGuard {
         // identical on every key, so which key answers doesn't change the result.
         let mut next = Some(self.credential.clone());
         let mut last_error = None;
+        let mut transient_retries = 0;
 
         for _ in 0..max_keys.max(1) {
             let Some(credential) = next.take() else {
                 break;
             };
 
-            match self.client.call(&req, &credential).await {
+            // Overload/5xx: same answer on every key, so wait and retry the same
+            // request a few times instead of burning keys or the job's attempts.
+            let mut result = self.client.call(&req, &credential).await;
+            while matches!(result, Err(ProviderError::Unavailable { .. })) && transient_retries < TRANSIENT_RETRIES {
+                let wait = transient_backoff(transient_retries);
+                transient_retries += 1;
+                println!(
+                    "⏳ [{}] temporarily unavailable, retry {}/{} in {:?}",
+                    self.provider, transient_retries, TRANSIENT_RETRIES, wait
+                );
+                tokio::time::sleep(wait).await;
+                result = self.client.call(&req, &credential).await;
+            }
+
+            match result {
                 Ok(v) => {
                     self.manager.record_success(&self.provider).await;
                     return Ok(v)
@@ -695,11 +737,7 @@ impl ProviderGuard {
         Err(last_error.unwrap_or_else(|| ProviderError::AllKeysExhausted(self.provider.to_string())))
     }
 
-    fn backoff(attempt: u32) -> std::time::Duration {
-        std::time::Duration::from_millis(
-            (100u64 * 2u64.pow(attempt)).min(30_000)
-        )
-    }
+
 }
 
 impl ProviderResponse {
@@ -784,6 +822,54 @@ mod tests {
             let guard = manager.acquire(&Provider::ElevenLabs).await.unwrap();
             assert_eq!(guard.credential.api_key, "good");
         }
+    }
+
+    /// Answers `Unavailable` for the first `fail_first` calls, then succeeds.
+    struct Flaky {
+        fail_first: u32,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderClient for Flaky {
+        fn provider(&self) -> Provider { Provider::CFWorker }
+        fn config(&self) -> ProviderConfig {
+            ProviderConfig { daily_limit: None, retry_after: 5, reset_daily: false, reset_monthly: false, reset_time: None }
+        }
+        async fn call(&self, _: &ProviderRequest, c: &ApiCredential) -> Result<ProviderResponse, ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                Err(ProviderError::Unavailable { provider: "t".into(), body: "high demand".into() })
+            } else {
+                Ok(ProviderResponse::Text(c.api_key.clone()))
+            }
+        }
+        fn is_auth_error(&self, _: u16, _: &str) -> bool { false }
+        fn is_quota_error(&self, _: u16, _: &str) -> bool { false }
+    }
+
+    async fn flaky_manager(fail_first: u32) -> (ProviderManager, Arc<Flaky>) {
+        let client = Arc::new(Flaky { fail_first, calls: Default::default() });
+        let manager = ProviderManager::new();
+        manager.register_with_keys(client.clone(), 10, "VIDEO_STUDIO_TEST_UNSET").await;
+        manager.add_key(&Provider::CFWorker, &client.config(), ApiCredential { api_key: "k".into(), account_id: None }).await;
+        (manager, client)
+    }
+
+    #[tokio::test]
+    async fn overload_is_retried_in_place() {
+        let (manager, client) = flaky_manager(2).await;
+        let guard = manager.acquire(&Provider::CFWorker).await.unwrap();
+        assert_eq!(guard.call(req()).await.unwrap().into_text().unwrap(), "k");
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn lasting_overload_returns_unavailable_after_retries() {
+        let (manager, client) = flaky_manager(u32::MAX).await;
+        let guard = manager.acquire(&Provider::CFWorker).await.unwrap();
+        assert!(matches!(guard.call(req()).await, Err(ProviderError::Unavailable { .. })));
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1 + TRANSIENT_RETRIES);
     }
 
     #[tokio::test]
