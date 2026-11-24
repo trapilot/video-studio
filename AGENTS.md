@@ -27,13 +27,13 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 | Publisher | 2 |
 | Cleaner | 1 |
 
-**Scheduler task** (`start_scheduler`): loops every 30 seconds. If `db.agent_is_busy(Planner)` is false (no Planner job pending or processing) and `db.count_workflows_today()` (UTC day) is below `config.workflow_per_day` (3), it calls `db.create_workflow(profile.id, "Create {profile.format}")` for the active profile (`STUDIO_PROFILE`) and creates the first job: parent `Manager`, agent `Planner`, payload `"Create new workflow"`. The Manager agent is therefore a placeholder that no job addresses.
+**Scheduler task** (`start_scheduler`): loops every 30 seconds. If `db.agent_is_busy(Planner)` is false (no Planner job pending or processing) and `db.count_workflows_today()` (local day) is below `config.workflow_per_day` (3), it calls `db.create_workflow(profile.id, "Create {profile.format}")` for the active profile (`STUDIO_PROFILE`) and creates the first job: parent `Manager`, agent `Planner`, payload `"Create new workflow"`. The Manager agent is therefore a placeholder that no job addresses.
 
 **Dispatch loop** (`dispatch`): calls `db.claim_job()`, which atomically moves the oldest pending job (`version = APP_VERSION`, `locked_at IS NULL`, `run_after` empty or past) to `processing`. It looks up the agent entry and calls `AgentPool::try_spawn`. If the pool is full the job goes back with `db.release_job` (retry count untouched). With no job the loop sleeps 5 s, and 1 s between jobs.
 
 **AgentPool** (`src/agent.rs`): a semaphore of the pool's size. `try_spawn` runs `agent.run(state, job)` in a task. On `Err`:
 
-- `retry_count < max_retry` (3): `db.retry_job` sets the job back to `pending`, increments `retry_count` and sets `run_after` to now plus `db::retry_delay_secs(retry_count)` (60 s, doubling, capped at 3600 s). The error text is stored in `jobs.result`.
+- `agent::should_retry(retry_count, max_retry)`, i.e. `retry_count + 1 < max_retry` (`max_retry` = 3 total attempts): `db.retry_job` sets the job back to `pending`, increments `retry_count` and sets `run_after` to now plus `db::retry_delay_secs(retry_count)` (60 s, doubling, capped at 3600 s). The error text is stored in `jobs.result`.
 - otherwise: `db.fail_job` marks the job `failed` and the workflow `failed`.
 
 **Recovery**: at startup `main.rs` calls `db.recover_interrupted_jobs()`, which turns every `processing` job back into `pending`.
@@ -59,7 +59,7 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 |---|---|---|
 | `AgentType`, `Agent`, `AgentPool`, `AgentError` | `src/agent.rs` | Agent contract. `AgentError` has `Handoff`, `Execute`, `Encode`, `Decode`. |
 | `job_profile(state, job)` | `src/agent.rs` | The `&'static StudioProfile` stored with the job's workflow. |
-| `Job`, `Workflow`, `JobStatus`, `WorkflowStatus` | `src/models/job.rs` | Queue rows. `Job::workflow_path()` is the output folder. |
+| `Job`, `Workflow`, `JobStatus`, `WorkflowStatus` | `src/models/job.rs` | Queue rows. `models::workflow_path(created_at, id)` builds the output folder; agents get it with `db.workflow_output_path` (dated by the workflow's creation). |
 | `StoryContext`, `Storyboard`, `Shot`, `Actor`, `Dialogue`, `Environment`, `Camera` | `src/entities/movie.rs` | Planner and Writer output. |
 | `Timeline`, `Clip`, `VideoMetadata` | `src/entities/movie.rs` | Builder and Renderer output. |
 | `Motion`, `Transition`, `Position` | `src/entities/movie.rs` | LLM-facing enums (lowercase names), each with an `ALL` list. |
@@ -216,7 +216,7 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 - **File**: `src/agents/cleaner.rs`
 - **Purpose**: close the workflow.
 - **Input**: `UploaderState`
-- **Process**: prints any per-channel error, completes its job with `DONE` and sets the workflow status to `completed`. It does not delete files.
+- **Process**: prints any per-channel error, deletes `shot_*/`, `video.mp4` and leftover `.part` files in `UploaderState.output_dir` (only inside `./output/.../<workflow_id>`, skipped when `cleanup.keep_intermediates`), completes its job with `DONE` and sets the workflow status to `completed`.
 - **Output**: none.
 
 ---

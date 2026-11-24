@@ -32,7 +32,7 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
            StoryContext  Storyboard  Timeline  VideoMetadata  UploaderState
 ```
 
-- **Scheduler** (`WorkflowEngine::start_scheduler`, `src/workflow.rs`): every 30 seconds, if no Planner job is pending or processing and fewer than `config.workflow_per_day` workflows were created today (UTC day), it creates a workflow for the active profile and its first job.
+- **Scheduler** (`WorkflowEngine::start_scheduler`, `src/workflow.rs`): every 30 seconds, if no Planner job is pending or processing and fewer than `config.workflow_per_day` workflows were created today (local day), it creates a workflow for the active profile and its first job.
 - **Dispatch loop** (`WorkflowEngine::dispatch`): claims the oldest runnable job with `db.claim_job()` and runs it in the agent's `AgentPool`. If the pool is full, the job is released with its retry count untouched.
 - **Agent pools** (concurrency per agent): Planner 10, Writer 2, Builder 1, Renderer 1, Publisher 2, Cleaner 1, Manager 1.
 - **Handoff**: an agent finishes by calling `db.handoff_job(job, next_agent, payload)`. That creates the next job with a JSON payload and marks the current job completed. Agents never call each other.
@@ -47,7 +47,7 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 | Builder | `Storyboard` | For every shot: generates an image (Cloudflare `flux-1-schnell`) and speech (local Piper, or ElevenLabs when Piper is not installed), measures the audio with `ffprobe` and computes clip and subtitle timing. | `Timeline` | `src/agents/builder.rs` |
 | Renderer | `Timeline` | Renders one clip per shot, joins them with `xfade`/`acrossfade`, burns in ASS subtitles. | `VideoMetadata` | `src/agents/renderer.rs` |
 | Publisher | `VideoMetadata` | Uploads `final_video.mp4` to every registered uploader (YouTube today) using the profile's publish data. | `UploaderState` | `src/agents/publisher.rs` |
-| Cleaner | `UploaderState` | Logs upload errors, completes its job and marks the workflow `completed`. It does not delete files. | none | `src/agents/cleaner.rs` |
+| Cleaner | `UploaderState` | Logs upload errors, deletes the per-shot files and the un-subtitled `video.mp4` (unless `cleanup.keep_intermediates`), completes its job and marks the workflow `completed`. | none | `src/agents/cleaner.rs` |
 
 Payload types live in `src/entities/movie.rs` (`StoryContext`, `Storyboard`, `Timeline`, `VideoMetadata`) and `src/uploader.rs` (`UploaderState`). See [AGENTS.md](AGENTS.md) for JSON examples and the full contract of each agent.
 
@@ -205,7 +205,7 @@ On the first run, if no YouTube token is stored in the database, the studio star
 | `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | Workers AI token and account id. Each key needs its own account id. |
 | `ELEVEN_LABS_KEY_n` | ElevenLabs provider | Speech fallback used by the Builder when Piper is not installed. |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | `oauth.rs` | Google OAuth client, used on the first run to authorize and later to refresh tokens. |
-| `YOUTUBE_REFRESH_TOKEN` | nothing | Listed in `.env.example` but not read by the code. |
+| `YOUTUBE_REFRESH_TOKEN` | `oauth.rs` | Optional. If set and no login is stored, it is saved as the YouTube login, so the browser flow is skipped (handy on headless machines). Needs the client id and secret. |
 | `TIKTOK_ACCESS_TOKEN` | TikTok uploader | Only read if the TikTok uploader is registered (it is not). |
 
 `.env` is loaded with `dotenvy` and is gitignored.
@@ -218,8 +218,9 @@ On the first run, if no YouTube token is stored in the database, the studio star
 | `workflow_per_day` | 3 | Scheduler |
 | `diffusion` | `num_steps` 4, `guidance` 3.5 | Builder, passed to Cloudflare flux-1-schnell |
 | `tts` | `speed`, `stability`, `similarity_boost` | Builder, ElevenLabs mode only |
-| `voice` | `base_voice`, `default_gender` | `base_voice` is the ElevenLabs voice for the narrator and unknown speakers; `default_gender` is not read |
-| `feature` | `enable_cache`, `enable_subtitle`, `enable_translation` | Not read by any agent (subtitles are always burned in) |
+| `voice` | `base_voice` | ElevenLabs voice for the narrator and speakers without a `voice_id`. Use a premade voice: custom voices exist only on the account that created them. |
+| `video` | `width`, `height`, `fps`, `burn_subtitles` | Output frame (1080x1920 @ 25) and whether subtitles are burned in. The `.ass` file is always written. |
+| `cleanup` | `keep_intermediates` | `true` keeps per-shot files and `video.mp4` after publishing (debugging). Default `false`. |
 
 ### Constants in code
 
@@ -242,16 +243,20 @@ Provider calls go through `ProviderManager` (`src/provider.rs`). Agents ask it f
 | `CFWorker` | Image generation | Builder | Cloudflare Workers AI `@cf/black-forest-labs/flux-1-schnell` | `CF_WORKER_KEY_n` + `CF_WORKER_ACCOUNT_n`, concurrency 10, 100000 requests per key per day |
 | `ElevenLabs` | Text to speech (fallback) | Builder, only when Piper is missing | `eleven_multilingual_v2`, 22.05 kHz 16-bit mono PCM wrapped as WAV | `ELEVEN_LABS_KEY_n`, concurrency 2 |
 
-Speech engine choice happens at runtime in the Builder (`src/agents/builder.rs`): if both `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx` exist it runs Piper locally; if either is missing it logs that and uses ElevenLabs through the provider manager. Both engines produce the same WAV format, so segments concatenate either way. In ElevenLabs mode each line uses the speaker's `voice_id` (matched by name or nickname in the workflow's profile), otherwise `config.voice.base_voice`.
+Speech engine choice happens at runtime in the Builder (`src/agents/builder.rs`): if both `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx` exist **and** the profile's language is English, it runs Piper locally; otherwise it logs why and uses ElevenLabs through the provider manager. Both engines produce the same WAV format, so segments concatenate either way. In ElevenLabs mode each line uses the speaker's `voice_id` (matched by name or nickname in the workflow's profile), otherwise `config.voice.base_voice`.
 
 How the manager behaves:
 
 - Keys are loaded from the environment at startup (`PREFIX_KEY_1`, `PREFIX_KEY_2`, ...) and used round-robin.
 - A key has an in-memory daily counter and an optional daily limit.
 - A quota response (`RequestExceeded`) blocks that key for the provider's `retry_after` (5 s) and the call moves on to the next key.
+- An invalid or revoked key (`RequestUnauthorized`) is disabled until tomorrow and the call moves on, so one bad key never fails a job.
+- An account-specific refusal (`KeyRejected`, e.g. an ElevenLabs `voice_not_found` for a voice that lives on another account) skips that key for an hour and tries the next one.
 - Other errors count as failures for a circuit breaker: 5 failures in a row open it for 60 seconds, during which `acquire` returns `None` (the job fails and is retried with backoff). Any successful call closes it.
 - `acquire` waits while the provider is at its concurrency limit or every key is blocked or over its limit.
 - Error messages strip URLs, and logs print the key number, never the key.
+
+**Several keys, same result.** Every request carries its full context, so it doesn't matter which key answers: Gemini calls are single-turn (the Planner gets topic history from the database, the Writer gets the story and cast in its prompt), Cloudflare image requests use a fixed seed per workflow (same prompt, same image on any account), and every ElevenLabs line uses the same voice id and settings. Keep custom ElevenLabs voices on every account whose key you add, or use premade voices.
 
 To add a provider, see `.claude/skills/add-provider/SKILL.md`.
 
@@ -259,7 +264,7 @@ To add a provider, see `.claude/skills/add-provider/SKILL.md`.
 
 ## Output layout
 
-Each workflow writes to `./output/{YYYYMMDD}/{workflow_id}/` (`Job::workflow_path`; the date is the job's creation date in local time). `output/` is gitignored.
+Each workflow writes to `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`; the date is the workflow's creation date in local time, so a workflow that runs past midnight stays in one folder). `output/` is gitignored.
 
 ```text
 output/
@@ -280,7 +285,7 @@ output/
 ## Reliability
 
 - **Retries with backoff.** When an agent returns an error, `AgentPool` calls `db.retry_job`: the job goes back to `pending` with `retry_count + 1` and `jobs.run_after` set 60 s, 120 s, 240 s ... later (doubling, capped at 1 hour, `db::retry_delay_secs`). `claim_job` ignores jobs whose `run_after` is in the future.
-- **Giving up.** A job with `retry_count >= max_retry` (3) is not retried again. `db.fail_job` marks the job and its workflow `failed`. That is up to 4 attempts in total.
+- **Giving up.** `max_retry` (3) is the total number of attempts (`agent::should_retry`). After the third failed attempt `db.fail_job` marks the job and its workflow `failed`.
 - **Crash recovery.** At startup `recover_interrupted_jobs` puts every job left in `processing` back to `pending`, so a crash never blocks the queue (a stuck Planner job would block new workflows).
 - **Pool full.** A job claimed while its agent pool is full is released with `release_job`, which keeps its retry count.
 - **Completion.** A workflow becomes `completed` in the Cleaner, `failed` in `fail_job`.
@@ -348,15 +353,15 @@ Do not use `cargo run` to test: it spends credits and uploads publicly.
 ## Known limitations
 
 - **TikTok is not registered.** `TiktokUploader` exists, and the Publisher builds a TikTok config, but `main.rs` registers only the YouTube uploader, so TikTok is skipped silently.
-- **Piper speaks English only.** It uses the English `en_US-lessac-medium` model. A profile whose `language` is not English needs another model (the path is a constant in `src/agents/builder.rs`) or ElevenLabs.
+- **Piper speaks English only.** It uses the English `en_US-lessac-medium` model, so the Builder uses Piper only for profiles whose `language` is English; other languages always go to ElevenLabs (`eleven_multilingual_v2`).
 - **`voice_id` is ignored by Piper.** With Piper every character speaks with the same voice; per-character voices only work in ElevenLabs mode.
 - **Images are square.** flux-1-schnell returns a square picture, which the Renderer center-crops to 9:16, so the Writer is told to keep the main subject centered.
 - **Uploads are always public** (`privacyStatus: "public"`).
 - **`acquire` can wait forever.** If every key of a provider is blocked or over its daily limit, `acquire` loops until one frees up instead of failing.
-- **Manager agent is a placeholder** and the Cleaner does not delete generated files.
+- **Manager agent is a placeholder.**
 
 ---
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).
