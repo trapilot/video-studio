@@ -40,6 +40,16 @@ impl ProviderClient for ElevenLabsClient {
     }
 
     
+    /// Custom/cloned voices belong to one account. With several keys (accounts),
+    /// a voice missing on one account may exist on another: rotate keys.
+    fn is_key_specific_error(
+        &self,
+        status: u16,
+        body: &str,
+    ) -> bool {
+        (status == 400 || status == 404) && body.contains("voice_not_found")
+    }
+
     fn provider(&self) -> Provider {
         Provider::ElevenLabs
     }

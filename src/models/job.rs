@@ -57,14 +57,11 @@ pub struct Job {
     pub created_at: i64,
     pub updated_at: i64,
 }
-impl Job {
-    pub fn workflow_path(&self) -> String {
-        let created = chrono::DateTime::from_timestamp(self.created_at, 0)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%Y%m%d")
-            .to_string();
+/// `./output/{YYYYMMDD}/{workflow_id}`, with the local date of `created_at`.
+pub fn workflow_path(created_at: i64, workflow_id: &str) -> String {
+    let date = chrono::DateTime::from_timestamp(created_at, 0)
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y%m%d").to_string())
+        .unwrap_or_else(|| "undated".to_string());
 
-        format!("./output/{}/{}", created, self.workflow_id)
-    }
+    format!("./output/{}/{}", date, workflow_id)
 }

@@ -74,13 +74,23 @@ impl RendererAgent {
         println!("🎬 [FFmpeg] Starting render video {}", timeline.video_path);
         join_clips(timeline).await?;
 
-        // 3. Burn in the subtitles.
+        // 3. Subtitles: always written as a sidecar .ass, burned in if configured.
         println!("🎬 [FFmpeg] Starting render subtitle {}", timeline.subtitle_path);
         tokio::fs::write(&timeline.subtitle_path, build_ass(timeline, video))
             .await
             .map_err(|e| format!("write {}: {}", timeline.subtitle_path, e))?;
 
         let tmp = helper::part_path(&timeline.final_path);
+        if !video.burn_subtitles {
+            run_ffmpeg(&[
+                "-y", "-i", &timeline.video_path,
+                "-c", "copy", "-movflags", "+faststart", "-f", "mp4", &tmp,
+            ]).await?;
+            helper::commit_part(&timeline.final_path).await?;
+            println!("🎬 [FFmpeg] Rendered successfully (subtitles not burned in)");
+            return Ok(metadata);
+        }
+
         run_ffmpeg(&[
             "-y",
             "-i", &timeline.video_path,
@@ -290,7 +300,7 @@ fn escape_filter_path(path: &str) -> String {
 mod tests {
     use super::*;
 
-    const VIDEO: VideoConfig = VideoConfig { width: 1080, height: 1920, fps: 25 };
+    const VIDEO: VideoConfig = VideoConfig { width: 1080, height: 1920, fps: 25, burn_subtitles: true };
 
     #[test]
     fn ass_header_is_not_indented() {

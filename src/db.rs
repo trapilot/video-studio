@@ -470,22 +470,33 @@ impl DbManager {
         Ok(exists > 0)
     }
 
+    /// Local midnight today. "Per day" limits use the machine's local day,
+    /// the same day used to name output folders.
     fn start_of_today_ts(&self) -> i64 {
-        let now = chrono::Utc::now();
-        let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
-        start.and_utc().timestamp()
+        self.start_of_recent_ts(1)
     }
 
+    /// Local midnight `days - 1` days ago (1 = today).
     fn start_of_recent_ts(&self, days: u8) -> i64 {
         let days_back = days.saturating_sub(1) as u64;
-        chrono::Utc::now()
+        let date = chrono::Local::now()
             .date_naive()
             .checked_sub_days(chrono::Days::new(days_back))
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp()
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        date.and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(chrono::Local).earliest())
+            .map(|t| t.timestamp())
+            .unwrap_or(0)
+    }
+
+    /// Output folder of a workflow, dated by the workflow's creation (local date),
+    /// so every agent and retry of that workflow uses the same folder.
+    pub async fn workflow_output_path(&self, workflow_id: &str) -> Result<String, sqlx::Error> {
+        let created: i64 = sqlx::query_scalar("SELECT created_at FROM workflows WHERE id = ?")
+            .bind(workflow_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(workflow_path(created, workflow_id))
     }
 }
 

@@ -41,6 +41,8 @@ pub struct ScriptRequest {
 
 pub struct ImageRequest {
     pub prompt: String,
+    /// Fixed seed so the same prompt gives the same image on every key/account.
+    pub seed: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub num_steps: Option<u32>,
@@ -88,6 +90,11 @@ pub enum ProviderError {
     #[error("[{provider}] Provider invalid api keys --> {body}")]
     RequestUnauthorized { provider: String, body: String },
 
+    /// The request is fine but this key's account can't serve it (e.g. an
+    /// ElevenLabs voice that exists only on another account). Try another key.
+    #[error("[{provider}] Key cannot serve this request --> {body}")]
+    KeyRejected { provider: String, body: String },
+
     #[error("[{0}] Provider all keys exhausted")]
     AllKeysExhausted(String),
 
@@ -106,6 +113,9 @@ pub enum ProviderError {
     #[error("[{client}] Provider client response error {error}")]
     ClientResponse { client: String, error: String },
 }
+
+/// How long a key that can't serve a request (`KeyRejected`) is skipped.
+const KEY_REJECTED_BLOCK_SECS: u64 = 3600;
 
 #[derive(Debug, Clone)]
 pub struct ApiCredential {
@@ -175,6 +185,12 @@ pub trait ProviderClient: Send + Sync {
     fn is_auth_error(&self, status: u16, body: &str) -> bool;
     fn is_quota_error(&self, status: u16, body: &str) -> bool;
 
+    /// Errors tied to one key's account rather than to the request
+    /// (see `ProviderError::KeyRejected`). Default: none.
+    fn is_key_specific_error(&self, _status: u16, _body: &str) -> bool {
+        false
+    }
+
     async fn read_json<T>(
         &self,
         res: reqwest::Response,
@@ -229,6 +245,13 @@ pub trait ProviderClient: Send + Sync {
 
         if self.is_auth_error(code, body) {
             return Err(ProviderError::RequestUnauthorized {
+                provider: self.provider().to_string(),
+                body: body.to_string(),
+            });
+        }
+
+        if self.is_key_specific_error(code, body) {
+            return Err(ProviderError::KeyRejected {
                 provider: self.provider().to_string(),
                 body: body.to_string(),
             });
@@ -627,8 +650,11 @@ impl ProviderGuard {
             .count_key(&self.provider)
             .await;
 
-        // Use the key `acquire` already picked (and counted); rotate only when it is rate-limited.
+        // Use the key `acquire` already picked (and counted). Rotate to another key
+        // only for key-level problems; the request itself (prompt, seed, voice) is
+        // identical on every key, so which key answers doesn't change the result.
         let mut next = Some(self.credential.clone());
+        let mut last_error = None;
 
         for _ in 0..max_keys.max(1) {
             let Some(credential) = next.take() else {
@@ -640,19 +666,33 @@ impl ProviderGuard {
                     self.manager.record_success(&self.provider).await;
                     return Ok(v)
                 },
-                Err(ProviderError::RequestExceeded { retry_after, .. }) => {
-                    self.manager.block_key(&self.provider, &credential.api_key, retry_after).await;
-                    next = self.manager.next_key(&self.provider).await;
-                    continue;
-                }
-                Err(e) => {
-                    self.manager.record_failure(&self.provider).await;
-                    return Err(e)
+                Err(e) => match &e {
+                    // Rate-limited: skip this key briefly.
+                    ProviderError::RequestExceeded { retry_after, .. } => {
+                        self.manager.block_key(&self.provider, &credential.api_key, *retry_after).await;
+                        last_error = Some(e);
+                    }
+                    // Invalid/revoked key: park it until tomorrow so it stops being picked.
+                    ProviderError::RequestUnauthorized { .. } => {
+                        eprintln!("🔴 [{}] a key was rejected as unauthorized; disabled until tomorrow", self.provider);
+                        self.manager.block_until_tomorrow(self.provider.clone(), &credential.api_key).await;
+                        last_error = Some(e);
+                    }
+                    // This account can't serve the request; another key's account may.
+                    ProviderError::KeyRejected { .. } => {
+                        self.manager.block_key(&self.provider, &credential.api_key, KEY_REJECTED_BLOCK_SECS).await;
+                        last_error = Some(e);
+                    }
+                    _ => {
+                        self.manager.record_failure(&self.provider).await;
+                        return Err(e);
+                    }
                 },
             }
+            next = self.manager.next_key(&self.provider).await;
         }
 
-        Err(ProviderError::AllKeysExhausted(self.provider.clone().to_string()))
+        Err(last_error.unwrap_or_else(|| ProviderError::AllKeysExhausted(self.provider.to_string())))
     }
 
     fn backoff(attempt: u32) -> std::time::Duration {
@@ -700,6 +740,50 @@ mod tests {
         ProviderRequest::Script(ScriptRequest {
             system: String::new(), prompt: String::new(), temperature: None, max_tokens: None, json_mode: false,
         })
+    }
+
+    /// Rejects the key "bad" as unauthorized and the key "nov" with an
+    /// account-specific error; answers with the key it was called with otherwise.
+    struct PicksGoodKey;
+
+    #[async_trait::async_trait]
+    impl ProviderClient for PicksGoodKey {
+        fn provider(&self) -> Provider { Provider::ElevenLabs }
+        fn config(&self) -> ProviderConfig {
+            ProviderConfig { daily_limit: None, retry_after: 5, reset_daily: false, reset_monthly: false, reset_time: None }
+        }
+        async fn call(&self, _: &ProviderRequest, c: &ApiCredential) -> Result<ProviderResponse, ProviderError> {
+            match c.api_key.as_str() {
+                "bad" => Err(ProviderError::RequestUnauthorized { provider: "t".into(), body: "invalid key".into() }),
+                "nov" => Err(ProviderError::KeyRejected { provider: "t".into(), body: "voice_not_found".into() }),
+                k => Ok(ProviderResponse::Text(k.to_string())),
+            }
+        }
+        fn is_auth_error(&self, _: u16, _: &str) -> bool { false }
+        fn is_quota_error(&self, _: u16, _: &str) -> bool { false }
+    }
+
+    #[tokio::test]
+    async fn rotates_past_bad_keys_and_stops_picking_them() {
+        let manager = ProviderManager::new();
+        manager.register_with_keys(Arc::new(PicksGoodKey), 10, "VIDEO_STUDIO_TEST_UNSET").await;
+        for key in ["bad", "nov", "good"] {
+            manager.add_key(&Provider::ElevenLabs, &PicksGoodKey.config(), ApiCredential { api_key: key.into(), account_id: None }).await;
+        }
+
+        // Whatever key acquire() starts with, the call ends on "good".
+        for _ in 0..4 {
+            let guard = manager.acquire(&Provider::ElevenLabs).await.unwrap();
+            let answer = guard.call(req()).await.unwrap().into_text().unwrap();
+            assert_eq!(answer, "good");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Both bad keys are now blocked, so only "good" is handed out.
+        for _ in 0..3 {
+            let guard = manager.acquire(&Provider::ElevenLabs).await.unwrap();
+            assert_eq!(guard.credential.api_key, "good");
+        }
     }
 
     #[tokio::test]

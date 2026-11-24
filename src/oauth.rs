@@ -21,6 +21,37 @@ pub async fn has_auth_token(db: &Arc<DbManager>) -> bool {
     )
 }
 
+/// If `YOUTUBE_REFRESH_TOKEN` is set and no authorized token is stored yet,
+/// store it so the browser login is skipped (useful on headless machines).
+/// The access token is fetched with it on the first upload.
+pub async fn seed_from_env(db: &Arc<DbManager>) -> Result<bool, String> {
+    let refresh_token = std::env::var("YOUTUBE_REFRESH_TOKEN").unwrap_or_default();
+    if refresh_token.trim().is_empty() || has_auth_token(db).await {
+        return Ok(false);
+    }
+
+    let client_id = std::env::var("YOUTUBE_CLIENT_ID").unwrap_or_default();
+    let client_secret = std::env::var("YOUTUBE_CLIENT_SECRET").unwrap_or_default();
+    if client_id.trim().is_empty() || client_secret.trim().is_empty() {
+        return Err("YOUTUBE_REFRESH_TOKEN needs YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET".to_string());
+    }
+
+    db.save_oauth_token(&OAuthToken {
+        provider: "youtube".to_string(),
+        client_id,
+        client_secret,
+        access_token: None,
+        refresh_token: Some(refresh_token.trim().to_string()),
+        auth_code: None,
+        expires_at: None,
+        updated_at: chrono::Utc::now().timestamp(),
+    })
+    .await
+    .map_err(|e| format!("Store YouTube token error: {}", e))?;
+
+    Ok(true)
+}
+
 fn is_authorized(token: &OAuthToken) -> bool {
     token.refresh_token.as_deref().is_some_and(|t| !t.trim().is_empty())
 }
@@ -349,6 +380,11 @@ mod tests {
 
         db.save_oauth_token(&token(Some("refresh"))).await.unwrap();
         assert!(has_auth_token(&db).await);
+
+        // An env refresh token never overwrites a completed login.
+        std::env::set_var("YOUTUBE_REFRESH_TOKEN", "from-env");
+        assert!(!seed_from_env(&db).await.unwrap());
+        std::env::remove_var("YOUTUBE_REFRESH_TOKEN");
 
         db.pool.close().await;
         let _ = std::fs::remove_file(&path);

@@ -8,7 +8,7 @@ pub struct Config {
     pub voice: VoiceConfig,
     pub tts: TtsConfig,
     pub diffusion: DiffusionParams,
-    pub feature: FeatureConfig,
+    pub cleanup: CleanupConfig,
     pub workflow_per_day: i64,
     // pub workflow_gap_minutes: i64,
 }
@@ -19,12 +19,15 @@ pub struct VideoConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Burn the dialogue into the video as subtitles.
+    pub burn_subtitles: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoiceConfig {
+    /// ElevenLabs voice for the narrator and any speaker without a `voice_id`.
+    /// Use a premade voice: custom voices exist only on the account that made them.
     pub base_voice: String,
-    pub default_gender: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,10 +44,10 @@ pub struct DiffusionParams {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct FeatureConfig {
-    pub enable_cache: bool,
-    pub enable_subtitle: bool,
-    pub enable_translation: bool,
+pub struct CleanupConfig {
+    /// Keep per-shot files and the un-subtitled video after publishing
+    /// (useful for debugging). `false` = the Cleaner deletes them.
+    pub keep_intermediates: bool,
 }
 
 pub fn build_config() -> Config {
@@ -54,12 +57,12 @@ pub fn build_config() -> Config {
             width: 1080,
             height: 1920,
             fps: 25,
+            burn_subtitles: true,
         },
         workflow_per_day: 3,
         // workflow_gap_minutes: 15,
         voice: VoiceConfig {
             base_voice: "pNInz6obpgDQGcFmaJgB".to_string(),
-            default_gender: "female".to_string(),
         },
         tts: TtsConfig {
             speed: 1.0,
@@ -70,10 +73,8 @@ pub fn build_config() -> Config {
             num_steps: 4,
             guidance: 3.5, 
         },
-        feature: FeatureConfig {
-            enable_cache: false,
-            enable_subtitle: false,
-            enable_translation: false,
+        cleanup: CleanupConfig {
+            keep_intermediates: false,
         },
     }
 }

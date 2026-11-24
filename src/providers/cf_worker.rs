@@ -64,13 +64,16 @@ impl CFWorkerClient {
     ) -> Result<ProviderResponse, ProviderError> {
 
         match req {
-            ImageRequest { prompt, num_steps, guidance, .. } => {
-                let payload = serde_json::json!({
+            ImageRequest { prompt, num_steps, guidance, seed, .. } => {
+                let mut payload = serde_json::json!({
                     "prompt": prompt,
                     "num_steps": num_steps,
                     "guidance": guidance,
                     "negative_prompt": "low quality, blurry, distorted face",
                 });
+                if let Some(seed) = seed {
+                    payload["seed"] = serde_json::json!(seed);
+                }
 
 
                 let Some(account_id) = &credential.account_id else {

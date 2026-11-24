@@ -27,7 +27,10 @@ pub struct UploaderError {
 pub struct UploaderState {
     pub all_uploaded: bool,
     pub any_uploaded: bool,
-    pub errors: UploaderError
+    pub errors: UploaderError,
+    /// The workflow's output folder, for the Cleaner.
+    #[serde(default)]
+    pub output_dir: Option<String>,
 }
 
 #[derive(Clone)]

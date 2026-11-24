@@ -39,6 +39,12 @@ pub enum AgentError {
     Decode(String),
 }
 
+/// `max_retry` is the total number of attempts. The run that just failed was
+/// attempt `retry_count + 1`; retry only if another attempt is allowed.
+pub fn should_retry(retry_count: i64, max_retry: i64) -> bool {
+    retry_count + 1 < max_retry
+}
+
 /// The profile of the workflow this job belongs to.
 pub async fn job_profile(
     state: &Arc<AppState>,
@@ -96,7 +102,7 @@ impl AgentPool {
                 let retry_count = job_clone.retry_count;
                 let max_retry = job_clone.max_retry;
 
-                let db_result = if retry_count < max_retry {
+                let db_result = if should_retry(retry_count, max_retry) {
                     state_clone.services.db.retry_job(&job_clone.id, retry_count, e.to_string()).await
                 } else {
                     state_clone.services.db.fail_job(&job_clone, e.to_string()).await
@@ -110,5 +116,18 @@ impl AgentPool {
         });
 
         true
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::should_retry;
+
+    #[test]
+    fn max_retry_is_total_attempts() {
+        // max_retry = 3: attempts 1 and 2 are retried, attempt 3 fails the job.
+        assert!(should_retry(0, 3));
+        assert!(should_retry(1, 3));
+        assert!(!should_retry(2, 3));
+        assert!(!should_retry(0, 1));
     }
 }

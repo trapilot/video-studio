@@ -63,12 +63,16 @@ impl Agent for BuilderAgent {
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
         let profile = job_profile(state, job).await?;
+        let output_path = state.services.db
+            .workflow_output_path(&job.workflow_id)
+            .await
+            .map_err(|e| AgentError::Execute(e.to_string()))?;
 
         let timeline: Timeline = self.execute(
                 &state,
                 profile,
                 &storyboard,
-                job.workflow_path(),
+                output_path,
             )
             .await
             .map_err(|e| AgentError::Execute(e.to_string()))?;
@@ -93,6 +97,10 @@ impl BuilderAgent {
         storyboard: &Storyboard,
         target_path: String
     ) -> Result<Timeline, String> {
+        // One seed per workflow: the same prompt then gives the same image on any
+        // Cloudflare account/key, so retries and key rotation stay consistent.
+        let seed = stable_seed(&target_path);
+
         let handles = storyboard
             .shots
             .iter()
@@ -113,6 +121,7 @@ impl BuilderAgent {
                     if !exists_image {
                         text_to_image(
                             shot.image_prompt(profile),
+                            seed,
                             assets.clone(),
                             config.clone(),
                             providers.clone()
@@ -214,6 +223,7 @@ impl BuilderAgent {
 
 async fn text_to_image(
     prompt: String,
+    seed: u32,
     assets: ShotAssets,
     config: Arc<config::Config>,
     providers: Arc<provider::ProviderManager>,
@@ -222,6 +232,7 @@ async fn text_to_image(
         provider::ProviderRequest::Image(
             provider::ImageRequest {
                 prompt: prompt,
+                seed: Some(seed),
                 num_steps: Some(config.diffusion.num_steps),
                 guidance: Some(config.diffusion.guidance),
                 width: None,
@@ -255,6 +266,8 @@ async fn text_to_image(
 
 const PIPER_BIN: &str = "./tools/piper/piper";
 const PIPER_MODEL: &str = "./tools/models/en_US-lessac-medium.onnx";
+/// Language of `PIPER_MODEL`. Profiles in other languages use ElevenLabs.
+const PIPER_LANGUAGE: &str = "English";
 const TTS_CONCURRENCY: usize = 4;
 /// Piper's lessac-medium model and the ElevenLabs request both produce this
 /// format, so segments from either engine can be concatenated.
@@ -270,23 +283,39 @@ pub enum TtsEngine {
 }
 
 impl TtsEngine {
-    /// Piper if both its binary and model exist, otherwise ElevenLabs.
-    /// Logged once per process so the choice is visible at the first shot.
-    pub fn detect() -> Self {
-        static LOGGED: std::sync::Once = std::sync::Once::new();
-
-        let piper_ok = std::path::Path::new(PIPER_BIN).is_file()
+    /// Piper if its binary and model exist and the profile speaks the model's
+    /// language (English); otherwise ElevenLabs (multilingual).
+    pub fn detect(language: &str) -> Self {
+        let installed = std::path::Path::new(PIPER_BIN).is_file()
             && std::path::Path::new(PIPER_MODEL).is_file();
-        let engine = if piper_ok { TtsEngine::Piper } else { TtsEngine::ElevenLabs };
+        let engine = Self::choose(installed, language);
 
-        LOGGED.call_once(|| match engine {
-            TtsEngine::Piper => println!("🔊 [Builder] Speech: Piper ({})", PIPER_MODEL),
-            TtsEngine::ElevenLabs => println!(
-                "🔊 [Builder] Speech: Piper not found ({} / {}), falling back to ElevenLabs",
-                PIPER_BIN, PIPER_MODEL
-            ),
-        });
+        // Log each distinct choice once, so it is visible without flooding the log.
+        static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let key = format!("{:?}/{}", engine, language);
+        if let Ok(mut seen) = LOGGED.lock() {
+            if !seen.contains(&key) {
+                seen.push(key);
+                match (engine, installed) {
+                    (TtsEngine::Piper, _) => println!("🔊 [Builder] Speech: Piper ({})", PIPER_MODEL),
+                    (TtsEngine::ElevenLabs, false) => println!(
+                        "🔊 [Builder] Speech: Piper not found ({} / {}), using ElevenLabs", PIPER_BIN, PIPER_MODEL
+                    ),
+                    (TtsEngine::ElevenLabs, true) => println!(
+                        "🔊 [Builder] Speech: Piper's model is English, profile language is {}, using ElevenLabs", language
+                    ),
+                }
+            }
+        }
         engine
+    }
+
+    fn choose(piper_installed: bool, language: &str) -> Self {
+        if piper_installed && language.trim().eq_ignore_ascii_case(PIPER_LANGUAGE) {
+            TtsEngine::Piper
+        } else {
+            TtsEngine::ElevenLabs
+        }
     }
 }
 
@@ -297,7 +326,7 @@ async fn text_to_audio(
     config: Arc<config::Config>,
     providers: Arc<provider::ProviderManager>,
 ) -> Result<(), String> {
-    let engine = TtsEngine::detect();
+    let engine = TtsEngine::detect(profile.language);
     let final_path = assets.audio_path.clone();
     let root_path = assets.root_path.clone();
 
@@ -475,4 +504,29 @@ async fn elevenlabs_tts(
         return Err(format!("ElevenLabs returned no WAV audio: {}", helper::preview(&wav)));
     }
     helper::write_atomic(segment_path, &wav).await
+}
+
+/// Deterministic 32-bit seed from a string (FNV-1a), stable across runs and Rust versions.
+pub fn stable_seed(s: &str) -> u32 {
+    s.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tts_engine_follows_install_and_language() {
+        assert_eq!(TtsEngine::choose(true, "English"), TtsEngine::Piper);
+        assert_eq!(TtsEngine::choose(true, "english "), TtsEngine::Piper);
+        assert_eq!(TtsEngine::choose(true, "Vietnamese"), TtsEngine::ElevenLabs);
+        assert_eq!(TtsEngine::choose(false, "English"), TtsEngine::ElevenLabs);
+    }
+
+    #[test]
+    fn seed_is_stable() {
+        assert_eq!(stable_seed("abc"), stable_seed("abc"));
+        assert_ne!(stable_seed("abc"), stable_seed("abd"));
+        assert_eq!(stable_seed(""), 0x811c9dc5);
+    }
 }

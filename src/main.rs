@@ -90,6 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AppState::build(profile).await?);
 
+    match oauth::seed_from_env(&state.services.db).await {
+        Ok(true) => println!("🔑 YouTube: using YOUTUBE_REFRESH_TOKEN from the environment"),
+        Ok(false) => {}
+        Err(e) => eprintln!("🔴 YouTube: {}", e),
+    }
+
     if !oauth::has_auth_token(&state.services.db).await {
         oauth::start_oauth_server(&state.services.db).await;
     }
@@ -99,11 +105,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("🔁 Requeued {} job(s) interrupted by the last shutdown", recovered);
     }
 
-    let revert_job = "";
-    if !revert_job.is_empty() {
-        println!("\nRevert current job: {}\n\n", revert_job);
-        state.services.db.revert_job(revert_job).await?;
-    }    
 
     let workflow = workflow::WorkflowEngine::new(state);
 

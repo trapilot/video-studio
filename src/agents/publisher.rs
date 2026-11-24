@@ -64,6 +64,9 @@ impl Agent for PublisherAgent {
             all_uploaded: success_count == results.len() && results.len() > 0,
             any_uploaded: success_count > 0,
             errors: publish_errors,
+            output_dir: std::path::Path::new(&video_metadata.video_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string()),
         };
         
         if !publish_state.any_uploaded {
