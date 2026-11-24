@@ -5,10 +5,10 @@ description: Work on the Writer agent (src/agents/writer.rs) and the Storyboard 
 
 # Writer agent
 
-**Code**: `src/agents/writer.rs`; types and parsing in `src/entities/movie.rs`. **Pool**: 2.
+**Code**: `src/agents/writer.rs`; types and parsing in `src/entities/storyboard.rs`. **Pool**: 2.
 
 ## Contract
-- Input: `StoryContext`. Output (handoff to Builder): `Storyboard { title, shots: [Shot] }`.
+- Input: `Brief`. Output (handoff to Builder): `Storyboard { title, shots: [Shot] }`.
 - Shot: `shot_id`, `visual_prompt`, `motion`, `transition`, `actors[]` (character, position, action, emotion), `dialogues[]` (character, text), `environment`, `camera`.
 
 ## How it works

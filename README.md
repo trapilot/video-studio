@@ -2,7 +2,7 @@
 
 Video Studio is an autonomous studio that produces short vertical videos of any kind you define and publishes them to YouTube Shorts. Kids stories, explainers and product promos all run through the same pipeline. Only the **studio profile** changes.
 
-It runs as a job queue. A scheduler creates a workflow, and a chain of agents (Planner, Writer, Builder, Renderer, Publisher, Cleaner) each pick up one job, do one piece of work and hand the result to the next agent. Everything is stored in SQLite, so a crash or an API failure resumes where it stopped.
+It runs as a job queue. A **production** is one video from topic to upload, made of a chain of jobs. A scheduler creates a production, and a chain of agents (Planner, Writer, Builder, Renderer, Publisher, Cleaner) each pick up one job, do one piece of work and hand the result to the next agent. Everything is stored in SQLite, so a crash or an API failure resumes where it stopped.
 
 > **Warning.** Running the studio calls paid or quota-limited APIs (Gemini, Cloudflare Workers AI) and **uploads videos publicly** to YouTube. Read [Quick start](#quick-start) before the first run.
 
@@ -12,11 +12,11 @@ It runs as a job queue. A scheduler creates a workflow, and a chain of agents (P
 
 ```text
                          ┌────────────────────────────────────────────────┐
-                         │                WorkflowEngine                  │
+                         │                Studio                  │
                          │                                                │
- scheduler task ─────────┼─► workflows + first job  ──┐                   │
+ scheduler task ─────────┼─► productions + first job  ──┐                   │
  (every 30 s, up to      │                            ▼                   │
-  workflow_per_day)      │              ┌──────────────────────┐          │
+  productions_per_day)      │              ┌──────────────────────┐          │
                          │              │  jobs table (SQLite) │◄───┐     │
                          │              └──────────┬───────────┘    │     │
                          │       dispatch loop:    │ claim_job()    │     │
@@ -28,28 +28,28 @@ It runs as a job queue. A scheduler creates a workflow, and a chain of agents (P
                          │        └──────────┴───────────┴── handoff_job() │
                          └────────────────────────────────────────────────┘
 
-Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
-           StoryContext  Storyboard  Timeline  VideoMetadata  UploaderState
+Producer -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
+           Brief  Storyboard  Timeline  FinalCut  DistributionReport
 ```
 
-- **Scheduler** (`WorkflowEngine::start_scheduler`, `src/workflow.rs`): every 30 seconds, if no Planner job is pending or processing and fewer than `config.workflow_per_day` workflows were created today (local day), it creates a workflow for the active profile and its first job.
-- **Dispatch loop** (`WorkflowEngine::dispatch`): claims the oldest runnable job with `db.claim_job()` and runs it in the agent's `AgentPool`. If the pool is full, the job is released with its retry count untouched.
-- **Agent pools** (concurrency per agent): Planner 10, Writer 2, Builder 1, Renderer 1, Publisher 2, Cleaner 1, Manager 1.
+- **Scheduler** (`Studio::start_scheduler`, `src/studio.rs`): every 30 seconds, if no Planner job is pending or processing and fewer than `config.productions_per_day` productions were created today (local day), it creates a production for the active profile and its first job.
+- **Dispatch loop** (`Studio::dispatch`): claims the oldest runnable job with `db.claim_job()` and runs it in the agent's `AgentPool`. If the pool is full, the job is released with its retry count untouched.
+- **Agent pools** (concurrency per agent): Planner 10, Writer 2, Builder 1, Renderer 1, Publisher 2, Cleaner 1, Producer 1.
 - **Handoff**: an agent finishes by calling `db.handoff_job(job, next_agent, payload)`. That creates the next job with a JSON payload and marks the current job completed. Agents never call each other.
 
 ### The agents
 
 | Agent | Input payload | What it does | Output payload | File |
 |---|---|---|---|---|
-| Manager | none | Placeholder. The scheduler creates the workflow and a job already addressed to the Planner (parent `manager`), so the Manager agent never receives a job today. | none | `src/agents/manager.rs` |
-| Planner | any (ignored; the profile comes from the workflow) | Asks Gemini for one topic that fits the profile, avoiding the last 30 days of topics of the same profile. With a cast it also picks the main, spotlight and supporting characters and validates every name. Saves the topic on the workflow. | `StoryContext` | `src/agents/planner.rs` |
-| Writer | `StoryContext` | Builds a prompt from the profile (format, audience, tone, visual style, rules, cast) and asks Gemini for a strict JSON storyboard. Parses it leniently. | `Storyboard` | `src/agents/writer.rs` |
+| Producer | none | Placeholder. The scheduler creates the production and a job already addressed to the Planner (parent `producer`), so the Producer agent never receives a job today. | none | `src/agents/producer.rs` |
+| Planner | any (ignored; the profile comes from the production) | Asks Gemini for one topic that fits the profile, avoiding the last 30 days of topics of the same profile. With a cast it also picks the main, spotlight and supporting characters and validates every name. Saves the topic on the production. | `Brief` | `src/agents/planner.rs` |
+| Writer | `Brief` | Builds a prompt from the profile (format, audience, tone, visual style, rules, cast) and asks Gemini for a strict JSON storyboard. Parses it leniently. | `Storyboard` | `src/agents/writer.rs` |
 | Builder | `Storyboard` | For every shot: generates an image (Cloudflare `flux-1-schnell`) and speech (local Piper, or ElevenLabs when Piper is not installed), measures the audio with `ffprobe` and computes clip and subtitle timing. | `Timeline` | `src/agents/builder.rs` |
-| Renderer | `Timeline` | Renders one clip per shot, joins them with `xfade`/`acrossfade`, burns in ASS subtitles. | `VideoMetadata` | `src/agents/renderer.rs` |
-| Publisher | `VideoMetadata` | Uploads `final_video.mp4` to every registered uploader (YouTube today) using the profile's publish data. | `UploaderState` | `src/agents/publisher.rs` |
-| Cleaner | `UploaderState` | Logs upload errors, deletes the per-shot files and the un-subtitled `video.mp4` (unless `cleanup.keep_intermediates`), completes its job and marks the workflow `completed`. | none | `src/agents/cleaner.rs` |
+| Renderer | `Timeline` | Renders one clip per shot, joins them with `xfade`/`acrossfade`, burns in ASS subtitles. | `FinalCut` | `src/agents/renderer.rs` |
+| Publisher | `FinalCut` | Uploads `final_video.mp4` to every registered uploader (YouTube today) using the profile's publish data. | `DistributionReport` | `src/agents/publisher.rs` |
+| Cleaner | `DistributionReport` | Logs upload errors, deletes the per-shot files and the un-subtitled `video.mp4` (unless `cleanup.keep_intermediates`), completes its job and marks the production `completed`. | none | `src/agents/cleaner.rs` |
 
-Payload types live in `src/entities/movie.rs` (`StoryContext`, `Storyboard`, `Timeline`, `VideoMetadata`) and `src/uploader.rs` (`UploaderState`). See [AGENTS.md](AGENTS.md) for JSON examples and the full contract of each agent.
+Payload types live in `src/entities/storyboard.rs` (`Brief`, `Storyboard`, `Timeline`, `FinalCut`) and `src/uploader.rs` (`DistributionReport`). See [AGENTS.md](AGENTS.md) for JSON examples and the full contract of each agent.
 
 ---
 
@@ -63,7 +63,7 @@ A `StudioProfile` (`src/entities/profile.rs`) describes one kind of video: what 
 |---|---|---|
 | `id` | `&str` | Stable slug (`kids_edu`). Used in `STUDIO_PROFILE`, `data/characters/<id>/` and topic dedup. Lowercase letters, digits and `_` only (checked by a test). Never rename it after producing videos. |
 | `name` | `&str` | Human-readable show or channel name. Shown in the startup log and given to the LLM. |
-| `format` | `&str` | What the video is, as a phrase that completes "producing ...". Also used as the workflow task text. |
+| `format` | `&str` | What the video is, as a phrase that completes "producing ...". Also used as the production task text. |
 | `audience` | `&str` | Who watches it. |
 | `tone` | `&str` | Voice and mood. |
 | `topic_brief` | `&str` | What the Planner comes up with each run ("Create {topic_brief}"). |
@@ -89,7 +89,7 @@ STUDIO_PROFILE=explainer cargo run
 
 - Unset or empty: `kids_edu`.
 - Unknown id: startup stops with an error that lists the known ids.
-- `STUDIO_PROFILE` only decides the profile of **new** workflows. Each workflow stores its profile id in `workflows.profile`, and every agent reads it back with `agent::job_profile`, so in-flight work keeps the profile it started with.
+- `STUDIO_PROFILE` only decides the profile of **new** productions. Each production stores its profile id in `productions.profile`, and every agent reads it back with `agent::job_profile`, so in-flight work keeps the profile it started with.
 
 The startup banner shows what is active:
 
@@ -189,7 +189,7 @@ cargo run                # or: STUDIO_PROFILE=explainer cargo run
 
 On the first run, if no YouTube token is stored in the database, the studio starts a local callback server on `127.0.0.1:8080`, prints a Google authorization URL and tries to open it in your browser. Approve the `youtube.upload` scope. The tokens are saved in the `oauth_tokens` table and refreshed automatically afterwards. Add `http://localhost:8080/auth/callback` as an authorized redirect URI of your Google OAuth client.
 
-`cargo run` starts the scheduler loop and runs until you stop it. It will create up to `workflow_per_day` (3) workflows per day, each one spending Gemini and Cloudflare quota and ending in a **public** YouTube upload. Do not run it casually.
+`cargo run` starts the scheduler loop and runs until you stop it. It will create up to `productions_per_day` (3) productions per day, each one spending Gemini and Cloudflare quota and ending in a **public** YouTube upload. Do not run it casually.
 
 ---
 
@@ -199,7 +199,7 @@ On the first run, if no YouTube token is stored in the database, the studio star
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `STUDIO_PROFILE` | `main.rs`, `entities::active_profile` | Profile id for new workflows. Default `kids_edu`. |
+| `STUDIO_PROFILE` | `main.rs`, `entities::active_profile` | Profile id for new productions. Default `kids_edu`. |
 | `STUDIO_DATA_DIR` | `entities::character::init` | Folder that holds `characters/<profile_id>/*.toml`. Default `./data`. |
 | `GEMINI_KEY_1`, `GEMINI_KEY_2`, ... | Gemini provider | Script LLM keys. Numbered from 1 with no gaps: loading stops at the first missing number. |
 | `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | Workers AI token and account id. Each key needs its own account id. |
@@ -215,8 +215,8 @@ On the first run, if no YouTube token is stored in the database, the studio star
 | Setting | Value | Used by |
 |---|---|---|
 | `video` | 1080 x 1920 at 25 fps | Renderer (every shot is scaled and center-cropped to it), subtitle layout |
-| `workflow_per_day` | 3 | Scheduler |
-| `diffusion` | `num_steps` 4, `guidance` 3.5 | Builder, passed to Cloudflare flux-1-schnell |
+| `productions_per_day` | 3 | Scheduler |
+| `image` | `num_steps` 4, `guidance` 3.5 | Builder, passed to Cloudflare flux-1-schnell |
 | `tts` | `speed`, `stability`, `similarity_boost` | Builder, ElevenLabs mode only |
 | `voice` | `base_voice` | ElevenLabs voice for the narrator and speakers without a `voice_id`. Use a premade voice: custom voices exist only on the account that created them. |
 | `video` | `width`, `height`, `fps`, `burn_subtitles` | Output frame (1080x1920 @ 25) and whether subtitles are burned in. The `.ass` file is always written. |
@@ -243,9 +243,9 @@ Provider calls go through `ProviderManager` (`src/provider.rs`). Agents ask it f
 | `CFWorker` | Image generation | Builder | Cloudflare Workers AI `@cf/black-forest-labs/flux-1-schnell` | `CF_WORKER_KEY_n` + `CF_WORKER_ACCOUNT_n`, concurrency 10, 100000 requests per key per day |
 | `ElevenLabs` | Text to speech (fallback) | Builder, only when Piper is missing | `eleven_multilingual_v2`, 22.05 kHz 16-bit mono PCM wrapped as WAV | `ELEVEN_LABS_KEY_n`, concurrency 2 |
 
-Speech engine choice happens at runtime in the Builder (`src/agents/builder.rs`): if both `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx` exist **and** the profile's language is English, it runs Piper locally; otherwise it logs why and uses ElevenLabs through the provider manager. Both engines produce the same WAV format, so segments concatenate either way. In ElevenLabs mode each line uses the speaker's `voice_id` (matched by name or nickname in the workflow's profile), otherwise `config.voice.base_voice`.
+Speech engine choice happens at runtime in the Builder (`src/agents/builder.rs`): if both `./tools/piper/piper` and `./tools/models/en_US-lessac-medium.onnx` exist **and** the profile's language is English, it runs Piper locally; otherwise it logs why and uses ElevenLabs through the provider manager. Both engines produce the same WAV format, so segments concatenate either way. In ElevenLabs mode each line uses the speaker's `voice_id` (matched by name or nickname in the production's profile), otherwise `config.voice.base_voice`.
 
-How the manager behaves:
+How the producer behaves:
 
 - Keys are loaded from the environment at startup (`PREFIX_KEY_1`, `PREFIX_KEY_2`, ...) and used round-robin.
 - A key has an in-memory daily counter and an optional daily limit.
@@ -256,7 +256,7 @@ How the manager behaves:
 - `acquire` waits while the provider is at its concurrency limit or every key is blocked or over its limit.
 - Error messages strip URLs, and logs print the key number, never the key.
 
-**Several keys, same result.** Every request carries its full context, so it doesn't matter which key answers: Gemini calls are single-turn (the Planner gets topic history from the database, the Writer gets the story and cast in its prompt), Cloudflare image requests use a fixed seed per workflow (same prompt, same image on any account), and every ElevenLabs line uses the same voice id and settings. Keep custom ElevenLabs voices on every account whose key you add, or use premade voices.
+**Several keys, same result.** Every request carries its full context, so it doesn't matter which key answers: Gemini calls are single-turn (the Planner gets topic history from the database, the Writer gets the story and cast in its prompt), Cloudflare image requests use a fixed seed per production (same prompt, same image on any account), and every ElevenLabs line uses the same voice id and settings. Keep custom ElevenLabs voices on every account whose key you add, or use premade voices.
 
 To add a provider, see `.claude/skills/add-provider/SKILL.md`.
 
@@ -264,12 +264,12 @@ To add a provider, see `.claude/skills/add-provider/SKILL.md`.
 
 ## Output layout
 
-Each workflow writes to `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`; the date is the workflow's creation date in local time, so a workflow that runs past midnight stays in one folder). `output/` is gitignored.
+Each production writes to `./output/{YYYYMMDD}/{production_id}/` (`db.production_output_path`; the date is the production's creation date in local time, so a production that runs past midnight stays in one folder). `output/` is gitignored.
 
 ```text
 output/
 └── 20260101/
-    └── 6f1c0b9e-.../              # workflow id
+    └── 6f1c0b9e-.../              # production id
         ├── shot_1/
         │   ├── image.png          # Builder: Cloudflare image (square)
         │   ├── audio.wav          # Builder: speech (Piper or ElevenLabs), segments concatenated
@@ -285,10 +285,10 @@ output/
 ## Reliability
 
 - **Retries with backoff.** When an agent returns an error, `AgentPool` calls `db.retry_job`: the job goes back to `pending` with `retry_count + 1` and `jobs.run_after` set 60 s, 120 s, 240 s ... later (doubling, capped at 1 hour, `db::retry_delay_secs`). `claim_job` ignores jobs whose `run_after` is in the future.
-- **Giving up.** `max_retry` (3) is the total number of attempts (`agent::should_retry`). After the third failed attempt `db.fail_job` marks the job and its workflow `failed`.
-- **Crash recovery.** At startup `recover_interrupted_jobs` puts every job left in `processing` back to `pending`, so a crash never blocks the queue (a stuck Planner job would block new workflows).
+- **Giving up.** `max_retry` (3) is the total number of attempts (`agent::should_retry`). After the third failed attempt `db.fail_job` marks the job and its production `failed`.
+- **Crash recovery.** At startup `recover_interrupted_jobs` puts every job left in `processing` back to `pending`, so a crash never blocks the queue (a stuck Planner job would block new productions).
 - **Pool full.** A job claimed while its agent pool is full is released with `release_job`, which keeps its retry count.
-- **Completion.** A workflow becomes `completed` in the Cleaner, `failed` in `fail_job`.
+- **Completion.** A production becomes `completed` in the Cleaner, `failed` in `fail_job`.
 - **Atomic files.** Images, audio, clips and videos are written to `<path>.part` and renamed, so a crash never leaves a truncated file that a later run would skip.
 - **Idempotent skips.** The Builder skips shots whose `image.png` or `audio.wav` exists, the Renderer skips existing `shot_N/video.mp4` and an existing `final_video.mp4`. Delete a file to force regeneration.
 - **Bad provider output.** The Builder rejects image responses that are not PNG, JPEG or WebP, and the storyboard parser falls back instead of failing on unknown motion, transition or position names.
@@ -302,7 +302,7 @@ output/
 ├── Cargo.toml
 ├── .env.example
 ├── migrations/
-│   └── schema_01.sql            # workflows, jobs, providers, oauth_tokens
+│   └── schema_01.sql            # productions, jobs, providers, oauth_tokens
 ├── data/characters/
 │   ├── README.md                # character file reference
 │   └── kids_edu/*.toml          # cast of the kids_edu profile
@@ -311,18 +311,18 @@ output/
 ├── .claude/skills/              # skills for coding agents
 └── src/
     ├── main.rs                  # AppState, provider/uploader registration, startup
-    ├── workflow.rs              # WorkflowEngine: scheduler + dispatch loop
+    ├── studio.rs                  # Studio: scheduler + dispatch loop
     ├── agent.rs                 # Agent trait, AgentType, AgentPool, AgentError, job_profile
-    ├── agents/                  # manager, planner, writer, builder, renderer, publisher, cleaner
+    ├── agents/                  # producer, planner, writer, builder, renderer, publisher, cleaner
     ├── entities/
     │   ├── profile.rs           # StudioProfile, PROFILES
     │   ├── character.rs         # Character, TOML loading and validation
-    │   └── movie.rs             # StoryContext, Storyboard, Shot, Timeline, Motion, Transition
-    ├── models/                  # Job, Workflow, statuses, OAuthToken
-    ├── db.rs                    # DbManager: queue, workflows, topics, tokens
+    │   └── storyboard.rs             # Brief, Storyboard, Shot, Timeline, Motion, Transition
+    ├── models/                  # Job, Production, statuses, OAuthToken
+    ├── db.rs                    # DbManager: queue, productions, topics, tokens
     ├── provider.rs              # ProviderManager, ProviderClient, keys, circuit breaker
     ├── providers/               # gemini.rs, cf_worker.rs, eleven_labs.rs
-    ├── uploader.rs              # Uploader trait, UploaderManager, UploaderState
+    ├── uploader.rs              # Uploader trait, UploaderManager, DistributionReport
     ├── uploaders/               # youtube.rs, tiktok.rs
     ├── oauth.rs                 # YouTube OAuth flow and token refresh
     ├── config.rs                # static settings
@@ -358,7 +358,7 @@ Do not use `cargo run` to test: it spends credits and uploads publicly.
 - **Images are square.** flux-1-schnell returns a square picture, which the Renderer center-crops to 9:16, so the Writer is told to keep the main subject centered.
 - **Uploads are always public** (`privacyStatus: "public"`).
 - **`acquire` can wait forever.** If every key of a provider is blocked or over its daily limit, `acquire` loops until one frees up instead of failing.
-- **Manager agent is a placeholder.**
+- **Producer agent is a placeholder.**
 
 ---
 

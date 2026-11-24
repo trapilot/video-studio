@@ -151,5 +151,5 @@ For a narrator-only profile, create no folder.
 - Keep `catchphrase` and `speaking_style` consistent with the personality text.
 - `topic_domain` steers the Planner. Be specific enough that topics map to a character.
 - Keep every `visual_template` in the art style of the profile's `visual_style`. Describe look and clothes; use `{age}` so the picture ages with the character.
-- Do not rename a character that existing workflows use; in-flight payloads store the full `name`.
+- Do not rename a character that existing productions use; in-flight payloads store the full `name`.
 - Leave a field out rather than filling it with filler.

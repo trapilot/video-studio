@@ -15,7 +15,7 @@ use crate::entities;
 #[serde(rename_all = "lowercase")]
 #[sqlx(rename_all = "lowercase", type_name = "text")]
 pub enum AgentType {
-    Manager,
+    Producer,
     Planner,
     Writer,
     Builder,
@@ -45,19 +45,19 @@ pub fn should_retry(retry_count: i64, max_retry: i64) -> bool {
     retry_count + 1 < max_retry
 }
 
-/// The profile of the workflow this job belongs to.
+/// The profile of the production this job belongs to.
 pub async fn job_profile(
     state: &Arc<AppState>,
     job: &models::Job,
 ) -> Result<&'static entities::StudioProfile, AgentError> {
     let id = state.services.db
-        .get_workflow_profile(&job.workflow_id)
+        .get_production_profile(&job.production_id)
         .await
         .map_err(|e| AgentError::Execute(e.to_string()))?
-        .ok_or_else(|| AgentError::Execute(format!("Workflow {} not found", job.workflow_id)))?;
+        .ok_or_else(|| AgentError::Execute(format!("Production {} not found", job.production_id)))?;
 
     entities::profile_by_id(&id)
-        .ok_or_else(|| AgentError::Execute(format!("Workflow {} uses unknown profile '{}'", job.workflow_id, id)))
+        .ok_or_else(|| AgentError::Execute(format!("Production {} uses unknown profile '{}'", job.production_id, id)))
 }
 
 #[async_trait]

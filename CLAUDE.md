@@ -24,19 +24,19 @@ STUDIO_PROFILE=<id> cargo run   # scheduler + agents, runs forever
 | Concern | Where |
 |---|---|
 | Startup, `AppState`, provider and uploader registration | `src/main.rs` |
-| Engine: scheduler task + dispatch loop + pool sizes | `src/workflow.rs` (`WorkflowEngine`) |
+| Engine: scheduler task + dispatch loop + pool sizes | `src/studio.rs` (`Studio`) |
 | `Agent` trait, `AgentType`, `AgentPool` (retry/fail), `AgentError`, `job_profile` | `src/agent.rs` |
-| Agents | `src/agents/{manager,planner,writer,builder,renderer,publisher,cleaner}.rs` |
-| Payloads, `Motion`, `Transition`, `Position`, `Storyboard::from_llm_json`, `Shot::image_prompt` | `src/entities/movie.rs` |
+| Agents | `src/agents/{producer,planner,writer,builder,renderer,publisher,cleaner}.rs` |
+| Payloads, `Motion`, `Transition`, `Position`, `Storyboard::from_llm_json`, `Shot::image_prompt` | `src/entities/storyboard.rs` |
 | Profiles (`StudioProfile`, `PROFILES`) | `src/entities/profile.rs` |
 | Characters (TOML loading, validation, `describe`) | `src/entities/character.rs`, data in `data/characters/` |
-| Queue, workflows, topics, OAuth tokens | `src/db.rs`, `migrations/schema_01.sql` |
-| `Job`, `Workflow`, statuses, `OAuthToken` | `src/models/` |
+| Queue, productions, topics, OAuth tokens | `src/db.rs`, `migrations/schema_01.sql` |
+| `Job`, `Production`, statuses, `OAuthToken` | `src/models/` |
 | Provider manager (keys, round-robin, limits) | `src/provider.rs` |
 | Provider clients | `src/providers/{gemini,cf_worker,eleven_labs}.rs` |
 | Uploaders and manager | `src/uploader.rs`, `src/uploaders/{youtube,tiktok}.rs` |
 | YouTube OAuth (callback server on :8080, refresh) | `src/oauth.rs` |
-| Static settings (`video`, `workflow_per_day`, `diffusion`, `tts`, `voice`) | `src/config.rs` |
+| Static settings (`video`, `productions_per_day`, `image`, `tts`, `voice`) | `src/config.rs` |
 | Atomic writes, `is_image`, `truncate_chars` | `src/helper.rs` |
 
 ## Provider wiring
@@ -50,16 +50,16 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 
 ## State and resume semantics
 
-- State is the `jobs` and `workflows` tables in `data_history.db`. A job payload is the JSON of the previous agent's output; handoff is `db.handoff_job`.
-- Failure: `AgentPool` calls `retry_job` (backoff via `jobs.run_after`, 60 s doubling to 1 h, `db::retry_delay_secs`) while `agent::should_retry` allows it (`max_retry` = 3 total attempts), then `fail_job` (job and workflow `failed`).
+- State is the `jobs` and `productions` tables in `data_history.db`. A job payload is the JSON of the previous agent's output; handoff is `db.handoff_job`.
+- Failure: `AgentPool` calls `retry_job` (backoff via `jobs.run_after`, 60 s doubling to 1 h, `db::retry_delay_secs`) while `agent::should_retry` allows it (`max_retry` = 3 total attempts), then `fail_job` (job and production `failed`).
 - Startup: `recover_interrupted_jobs` requeues jobs left `processing`.
-- The Cleaner marks the workflow `completed`.
+- The Cleaner marks the production `completed`.
 - `APP_VERSION` (`src/db.rs`) filters which jobs are claimed and counted busy. Bump it after an incompatible payload change so old jobs are ignored.
 - The schema (`migrations/schema_01.sql`) is applied only when the DB file is created. The project is not deployed, so change the schema by editing `schema_01.sql` and deleting your local `data_history.db`.
 - New fields on payload structs should be `Option<T>` or `#[serde(default)]` so queued jobs still decode.
 - Assets are idempotent: Builder skips existing `shot_N/image.png` and `audio.wav`; Renderer skips existing `shot_N/video.mp4` and `final_video.mp4`. Delete them to force regeneration.
-- Output path: `./output/{YYYYMMDD}/{workflow_id}/` (`db.workflow_output_path`, dated by the workflow's creation, local time). The Cleaner deletes intermediates after publishing unless `cleanup.keep_intermediates`.
-- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per workflow) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`).
+- Output path: `./output/{YYYYMMDD}/{production_id}/` (`db.production_output_path`, dated by the production's creation, local time). The Cleaner deletes intermediates after publishing unless `cleanup.keep_intermediates`.
+- Several keys per provider: requests must stay self-contained (full context in each prompt, fixed image seed per production) so any key gives the same result. Bad keys rotate (`RequestUnauthorized`, `KeyRejected`).
 
 ## Conventions
 
@@ -67,7 +67,7 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 - Parse LLM output leniently and never `unwrap()` it. Unknown enum values fall back (see `Storyboard::from_llm_json`).
 - Validate character names with `profile.character(name)` (full name or nickname). Store full names.
 - Never hardcode audience, format, language, visual style or publish data. Read them from the profile (`job_profile`). Characters are data files in `data/characters/`, never Rust.
-- Profile ids are persisted in `workflows.profile` and used as folder names: do not rename them.
+- Profile ids are persisted in `productions.profile` and used as folder names: do not rename them.
 - Never log secrets or put keys in URLs (Gemini uses a header). Use `e.without_url()` on reqwest errors.
 - Write generated files atomically with `helper::write_atomic`, or `helper::part_path` plus `helper::commit_part`.
 - Check provider bytes before saving (`helper::is_image`).
@@ -77,4 +77,4 @@ Agents never call HTTP APIs directly. They use `state.services.providers.acquire
 
 ## Skills
 
-Project skills in `.claude/skills/`: `planner-agent`, `writer-agent`, `builder-agent`, `renderer-agent`, `publisher-agent`, `add-profile`, `add-provider`, `debug-workflow`.
+Project skills in `.claude/skills/`: `planner-agent`, `writer-agent`, `builder-agent`, `renderer-agent`, `publisher-agent`, `add-profile`, `add-provider`, `debug-production`.

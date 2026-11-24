@@ -17,15 +17,15 @@ impl Agent for WriterAgent {
         
         let profile = job_profile(state, job).await?;
 
-        let story_context: StoryContext =
+        let brief: Brief =
             serde_json::from_str(&job.payload)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
         // Cast block: everything the character files say about the chosen characters.
         let (cast_block, cast_rules) = if profile.has_cast() {
-            let mut names = vec![story_context.main_character.clone()];
-            names.extend(story_context.spotlight_characters.iter().cloned());
-            names.extend(story_context.supporting_characters.iter().cloned());
+            let mut names = vec![brief.main_character.clone()];
+            names.extend(brief.spotlight_characters.iter().cloned());
+            names.extend(brief.supporting_characters.iter().cloned());
 
             let chosen = profile.enabled_cast()
                 .filter(|c| names.iter().any(|n| c.answers_to(n)))
@@ -197,10 +197,10 @@ impl Agent for WriterAgent {
 
             Return JSON only.
             "#,
-                story_context.topic,
-                story_context.main_character,
-                story_context.spotlight_characters.join(", "),
-                story_context.supporting_characters.join(", "),
+                brief.topic,
+                brief.main_character,
+                brief.spotlight_characters.join(", "),
+                brief.supporting_characters.join(", "),
             )
         } else {
             format!(r#"
@@ -214,7 +214,7 @@ impl Agent for WriterAgent {
 
             Return JSON only.
             "#,
-                story_context.topic,
+                brief.topic,
                 NARRATOR,
             )
         };

@@ -1,4 +1,4 @@
-pub mod manager;
+pub mod producer;
 pub mod planner;
 pub mod writer;
 pub mod builder;
@@ -6,7 +6,7 @@ pub mod renderer;
 pub mod publisher;
 pub mod cleaner;
 
-pub use manager::ManagerAgent;
+pub use producer::ProducerAgent;
 pub use planner::PlannerAgent;
 pub use writer::WriterAgent;
 pub use builder::BuilderAgent;

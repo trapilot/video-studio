@@ -8,7 +8,7 @@ use crate::agent;
 #[strum(serialize_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 #[sqlx(rename_all = "lowercase", type_name = "text")]
-pub enum WorkflowStatus {
+pub enum ProductionStatus {
     Pending,
     Running,
     Completed,
@@ -32,11 +32,11 @@ impl Default for JobStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct Workflow {
+pub struct Production {
     pub id: String,
     pub task: String,
     pub topic: Option<String>,
-    pub status: WorkflowStatus,
+    pub status: ProductionStatus,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -44,7 +44,7 @@ pub struct Workflow {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Job {
     pub id: String,
-    pub workflow_id: String,
+    pub production_id: String,
     pub parent: agent::AgentType,
     pub agent: agent::AgentType,
     pub version: String,
@@ -57,11 +57,11 @@ pub struct Job {
     pub created_at: i64,
     pub updated_at: i64,
 }
-/// `./output/{YYYYMMDD}/{workflow_id}`, with the local date of `created_at`.
-pub fn workflow_path(created_at: i64, workflow_id: &str) -> String {
+/// `./output/{YYYYMMDD}/{production_id}`, with the local date of `created_at`.
+pub fn production_path(created_at: i64, production_id: &str) -> String {
     let date = chrono::DateTime::from_timestamp(created_at, 0)
         .map(|t| t.with_timezone(&chrono::Local).format("%Y%m%d").to_string())
         .unwrap_or_else(|| "undated".to_string());
 
-    format!("./output/{}/{}", date, workflow_id)
+    format!("./output/{}/{}", date, production_id)
 }

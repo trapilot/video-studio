@@ -115,7 +115,7 @@ impl DbManager {
 
     pub async fn create_job(
         &self,
-        workflow_id: String,
+        production_id: String,
         parent: agent::AgentType,
         agent: agent::AgentType,
         payload: String,
@@ -127,7 +127,7 @@ impl DbManager {
             r#"
             INSERT INTO jobs (
                 id,
-                workflow_id,
+                production_id,
                 parent,
                 agent,
                 version,
@@ -141,7 +141,7 @@ impl DbManager {
             "#
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(workflow_id)
+        .bind(production_id)
         .bind(parent.to_string())
         .bind(agent.to_string())
         .bind(APP_VERSION)
@@ -181,7 +181,7 @@ impl DbManager {
         .await?;
 
         // match &job {
-        //     Some(j) => println!("Job: {}", j.workflow_id),
+        //     Some(j) => println!("Job: {}", j.production_id),
         //     None => println!("No pending jobs found"),
         // }
 
@@ -239,7 +239,7 @@ impl DbManager {
         Ok(())
     }
 
-    /// Give up on a job and mark its workflow failed.
+    /// Give up on a job and mark its production failed.
     pub async fn fail_job(
         &self,
         job: &Job,
@@ -259,18 +259,18 @@ impl DbManager {
         .execute(&self.pool)
         .await?;
 
-        self.set_workflow_status(&job.workflow_id, WorkflowStatus::Failed).await
+        self.set_production_status(&job.production_id, ProductionStatus::Failed).await
     }
 
-    pub async fn set_workflow_status(
+    pub async fn set_production_status(
         &self,
-        workflow_id: &str,
-        status: WorkflowStatus,
+        production_id: &str,
+        status: ProductionStatus,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE workflows SET status = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE productions SET status = ?, updated_at = ? WHERE id = ?")
             .bind(status.to_string())
             .bind(chrono::Utc::now().timestamp())
-            .bind(workflow_id)
+            .bind(production_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -289,7 +289,7 @@ impl DbManager {
 
     /// At startup nothing is running yet, so any job still marked processing was
     /// interrupted by a crash or restart. Requeue it; otherwise it stays locked
-    /// forever and (for the Planner) blocks every new workflow.
+    /// forever and (for the Planner) blocks every new production.
     pub async fn recover_interrupted_jobs(&self) -> Result<u64, sqlx::Error> {
         let result = sqlx::query("UPDATE jobs SET status = ?, locked_at = NULL WHERE status = ?")
             .bind(JobStatus::Pending.to_string())
@@ -324,7 +324,7 @@ impl DbManager {
     ) -> Result<(), String> {
         if job.agent != agent {
             self.create_job(
-                job.workflow_id.clone(),
+                job.production_id.clone(),
                 job.agent.clone(),
                 agent,
                 payload.clone(),
@@ -340,19 +340,19 @@ impl DbManager {
         Ok(())
     }
 
-    pub async fn create_workflow(
+    pub async fn create_production(
         &self,
         profile: &str,
         task: String,
     ) -> Result<String, sqlx::Error> {
 
-        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let production_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();
         let next_24h = now + 24 * 60 * 60;
 
         sqlx::query(
             r#"
-            INSERT INTO workflows (
+            INSERT INTO productions (
                 id,
                 profile,
                 task,
@@ -364,26 +364,26 @@ impl DbManager {
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(&workflow_id)
+        .bind(&production_id)
         .bind(profile)
         .bind(task)
-        .bind(WorkflowStatus::Running.to_string())
+        .bind(ProductionStatus::Running.to_string())
         .bind(next_24h)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
         .await?;
 
-        Ok(workflow_id)
+        Ok(production_id)
     }
 
-    pub async fn count_workflows_today(&self) -> Result<i64, sqlx::Error> {
+    pub async fn count_productions_today(&self) -> Result<i64, sqlx::Error> {
         let start = self.start_of_today_ts();
 
         let count: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*)
-            FROM workflows
+            FROM productions
             WHERE created_at >= ?
             "#
         )
@@ -396,12 +396,12 @@ impl DbManager {
 
     pub async fn save_topic(
         &self,
-        workflow_id: &str,
+        production_id: &str,
         topic: String,
-    ) -> Result<Option<Workflow>, sqlx::Error> {
-        let workflow = sqlx::query_as::<_, Workflow>(
+    ) -> Result<Option<Production>, sqlx::Error> {
+        let production = sqlx::query_as::<_, Production>(
             r#"
-            UPDATE workflows
+            UPDATE productions
             SET topic = ?, updated_at = ?
             WHERE id = ?
             RETURNING *
@@ -409,20 +409,20 @@ impl DbManager {
         )
         .bind(topic)
         .bind(chrono::Utc::now().timestamp())
-        .bind(workflow_id)
+        .bind(production_id)
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(workflow)
+        Ok(production)
     }
 
-    /// Topics of this profile's workflows from the last `days` days, newest first.
+    /// Topics of this profile's productions from the last `days` days, newest first.
     pub async fn get_recent_topics(&self, profile: &str, days: u8, limit: u32) -> Result<Vec<String>, sqlx::Error> {
         let since = self.start_of_recent_ts(days);
         let topics = sqlx::query_scalar::<_, String>(
             r#"
             SELECT topic
-            FROM workflows
+            FROM productions
             WHERE profile = ? AND created_at >= ? AND status != ? AND topic IS NOT NULL
             ORDER BY created_at DESC
             LIMIT ?
@@ -430,7 +430,7 @@ impl DbManager {
         )
         .bind(profile)
         .bind(since)
-        .bind(WorkflowStatus::Failed.to_string())
+        .bind(ProductionStatus::Failed.to_string())
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -438,10 +438,10 @@ impl DbManager {
         Ok(topics)
     }
     
-    /// Profile id a workflow was created with.
-    pub async fn get_workflow_profile(&self, workflow_id: &str) -> Result<Option<String>, sqlx::Error> {
-        sqlx::query_scalar::<_, String>("SELECT profile FROM workflows WHERE id = ?")
-            .bind(workflow_id)
+    /// Profile id a production was created with.
+    pub async fn get_production_profile(&self, production_id: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>("SELECT profile FROM productions WHERE id = ?")
+            .bind(production_id)
             .fetch_optional(&self.pool)
             .await
     }
@@ -489,14 +489,14 @@ impl DbManager {
             .unwrap_or(0)
     }
 
-    /// Output folder of a workflow, dated by the workflow's creation (local date),
-    /// so every agent and retry of that workflow uses the same folder.
-    pub async fn workflow_output_path(&self, workflow_id: &str) -> Result<String, sqlx::Error> {
-        let created: i64 = sqlx::query_scalar("SELECT created_at FROM workflows WHERE id = ?")
-            .bind(workflow_id)
+    /// Output folder of a production, dated by the production's creation (local date),
+    /// so every agent and retry of that production uses the same folder.
+    pub async fn production_output_path(&self, production_id: &str) -> Result<String, sqlx::Error> {
+        let created: i64 = sqlx::query_scalar("SELECT created_at FROM productions WHERE id = ?")
+            .bind(production_id)
             .fetch_one(&self.pool)
             .await?;
-        Ok(workflow_path(created, workflow_id))
+        Ok(production_path(created, production_id))
     }
 }
 
@@ -514,20 +514,20 @@ mod tests {
     async fn queue_topics_backoff_and_recovery() {
         let (db, path) = temp_db().await;
 
-        // Topic history is per profile and skips failed workflows.
-        let kids = db.create_workflow("kids_edu", "t".into()).await.unwrap();
+        // Topic history is per profile and skips failed productions.
+        let kids = db.create_production("kids_edu", "t".into()).await.unwrap();
         db.save_topic(&kids, "Why stars twinkle".into()).await.unwrap();
-        let failed = db.create_workflow("kids_edu", "t".into()).await.unwrap();
+        let failed = db.create_production("kids_edu", "t".into()).await.unwrap();
         db.save_topic(&failed, "Broken".into()).await.unwrap();
-        db.set_workflow_status(&failed, WorkflowStatus::Failed).await.unwrap();
-        let other = db.create_workflow("explainer", "t".into()).await.unwrap();
+        db.set_production_status(&failed, ProductionStatus::Failed).await.unwrap();
+        let other = db.create_production("explainer", "t".into()).await.unwrap();
         db.save_topic(&other, "How batteries work".into()).await.unwrap();
 
         assert_eq!(db.get_recent_topics("kids_edu", 30, 10).await.unwrap(), vec!["Why stars twinkle"]);
-        assert_eq!(db.get_workflow_profile(&other).await.unwrap().as_deref(), Some("explainer"));
+        assert_eq!(db.get_production_profile(&other).await.unwrap().as_deref(), Some("explainer"));
 
         // A retried job waits for its backoff before it can be claimed again.
-        db.create_job(kids.clone(), agent::AgentType::Manager, agent::AgentType::Planner, "{}".into()).await.unwrap();
+        db.create_job(kids.clone(), agent::AgentType::Producer, agent::AgentType::Planner, "{}".into()).await.unwrap();
         let job = db.claim_job().await.unwrap().expect("job claimable");
         db.retry_job(&job.id, job.retry_count, "boom".into()).await.unwrap();
         assert!(db.claim_job().await.unwrap().is_none(), "retry must wait for its backoff");
@@ -539,12 +539,12 @@ mod tests {
         assert_eq!(db.recover_interrupted_jobs().await.unwrap(), 1);
         let job = db.claim_job().await.unwrap().expect("claimable after recovery");
 
-        // Releasing (agent pool full) keeps the retry count; failing marks the workflow failed.
+        // Releasing (agent pool full) keeps the retry count; failing marks the production failed.
         db.release_job(&job.id).await.unwrap();
         let job = db.claim_job().await.unwrap().unwrap();
         assert_eq!(job.retry_count, 1);
         db.fail_job(&job, "gave up".into()).await.unwrap();
-        let status: String = sqlx::query_scalar("SELECT status FROM workflows WHERE id = ?")
+        let status: String = sqlx::query_scalar("SELECT status FROM productions WHERE id = ?")
             .bind(&kids).fetch_one(&db.pool).await.unwrap();
         assert_eq!(status, "failed");
 

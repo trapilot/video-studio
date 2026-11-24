@@ -13,24 +13,24 @@ pub struct CleanerAgent;
 #[async_trait]
 impl Agent for CleanerAgent {
     async fn run(&self, state: &Arc<AppState>, job: &Job) -> Result<(), AgentError> {
-        println!("📤 [Cleaner] Cleaning workflow...");
+        println!("📤 [Cleaner] Cleaning production...");
 
-        let publish_state: uploader::UploaderState =
+        let report: uploader::DistributionReport =
             serde_json::from_str(&job.payload)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
         
-        if let Some(err) = &publish_state.errors.youtube {
+        if let Some(err) = &report.errors.youtube {
             eprintln!("🔴 YouTube error: {}", err);
         }
 
-        if let Some(err) = &publish_state.errors.tiktok {
+        if let Some(err) = &report.errors.tiktok {
             eprintln!("🔴 TikTok error: {}", err);
         }
 
         if !state.config.cleanup.keep_intermediates {
-            if let Some(dir) = &publish_state.output_dir {
+            if let Some(dir) = &report.output_dir {
                 // Cleanup is best effort: a failure here must not fail a published video.
-                match remove_intermediates(dir, &job.workflow_id).await {
+                match remove_intermediates(dir, &job.production_id).await {
                     Ok(n) => println!("🧹 [Cleaner] Removed {} intermediate item(s) in {}", n, dir),
                     Err(e) => eprintln!("🔴 [Cleaner] Cleanup skipped: {}", e),
                 }
@@ -43,7 +43,7 @@ impl Agent for CleanerAgent {
             .map_err(|e| AgentError::Handoff(e.to_string()))?;
 
         state.services.db
-            .set_workflow_status(&job.workflow_id, WorkflowStatus::Completed)
+            .set_production_status(&job.production_id, ProductionStatus::Completed)
             .await
             .map_err(|e| AgentError::Handoff(e.to_string()))?;
 
@@ -53,12 +53,12 @@ impl Agent for CleanerAgent {
 /// Delete what is only needed to build the final video: the `shot_*` folders,
 /// the un-subtitled `video.mp4` and leftover `.part` files. Keeps
 /// `final_video.mp4` and `subtitle.ass`. Refuses any folder that is not
-/// `./output/<date>/<workflow_id>`.
-async fn remove_intermediates(dir: &str, workflow_id: &str) -> Result<usize, String> {
+/// `./output/<date>/<production_id>`.
+async fn remove_intermediates(dir: &str, production_id: &str) -> Result<usize, String> {
     let path = std::path::Path::new(dir);
     let under_output = path.components().any(|c| c.as_os_str() == "output");
-    let is_workflow_dir = path.file_name().and_then(|n| n.to_str()) == Some(workflow_id);
-    if !under_output || !is_workflow_dir || workflow_id.trim().is_empty() || dir.contains("..") {
+    let is_production_dir = path.file_name().and_then(|n| n.to_str()) == Some(production_id);
+    if !under_output || !is_production_dir || production_id.trim().is_empty() || dir.contains("..") {
         return Err(format!("refusing to clean unexpected folder {}", dir));
     }
 
@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn removes_only_intermediates_in_the_workflow_folder() {
+    async fn removes_only_intermediates_in_the_production_folder() {
         let id = uuid::Uuid::new_v4().to_string();
         let root = std::env::temp_dir().join(format!("vs_clean_{}", id)).join("output").join("20260101").join(&id);
         for d in ["shot_1", "shot_2"] {
@@ -104,7 +104,7 @@ mod tests {
         assert!(root.join("subtitle.ass").exists());
         assert!(!root.join("shot_1").exists() && !root.join("video.mp4").exists());
 
-        // Wrong workflow id or a folder outside output/ is refused.
+        // Wrong production id or a folder outside output/ is refused.
         assert!(remove_intermediates(&dir, "other").await.is_err());
         assert!(remove_intermediates("/tmp", "tmp").await.is_err());
 

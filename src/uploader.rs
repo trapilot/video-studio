@@ -24,11 +24,11 @@ pub struct UploaderError {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UploaderState {
+pub struct DistributionReport {
     pub all_uploaded: bool,
     pub any_uploaded: bool,
     pub errors: UploaderError,
-    /// The workflow's output folder, for the Cleaner.
+    /// The production's output folder, for the Cleaner.
     #[serde(default)]
     pub output_dir: Option<String>,
 }
@@ -39,7 +39,7 @@ pub enum ChannelConfig {
         category_id: String,
         description: String,
         tags: Vec<String>,
-        /// COPPA "made for kids" flag, from the workflow's profile.
+        /// COPPA "made for kids" flag, from the production's profile.
         made_for_kids: bool,
     },
     Tiktok {

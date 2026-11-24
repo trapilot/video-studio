@@ -4,7 +4,7 @@ mod oauth;
 mod config;
 mod provider;
 mod uploader;
-mod workflow;
+mod studio;
 mod helper;
 
 mod agents;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub services: Arc<Services>,
     pub config: Arc<config::Config>,
-    /// Profile for new workflows (`STUDIO_PROFILE`). Running workflows use their own.
+    /// Profile for new productions (`STUDIO_PROFILE`). Running productions use their own.
     pub profile: &'static entities::StudioProfile,
 }
 
@@ -106,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
 
-    let workflow = workflow::WorkflowEngine::new(state);
+    let studio = studio::Studio::new(state);
 
-    workflow.start().await;
+    studio.start().await;
     
     Ok(())
 }

@@ -5,12 +5,12 @@ description: Work on the Publisher agent and uploaders (src/agents/publisher.rs,
 
 # Publisher agent and uploaders
 
-**Code**: `src/agents/publisher.rs`, `src/uploader.rs` (`Uploader` trait, `UploaderManager`, `UploaderState`), `src/uploaders/youtube.rs`, `src/uploaders/tiktok.rs`, `src/oauth.rs`. **Pool**: 2.
+**Code**: `src/agents/publisher.rs`, `src/uploader.rs` (`Uploader` trait, `UploaderManager`, `DistributionReport`), `src/uploaders/youtube.rs`, `src/uploaders/tiktok.rs`, `src/oauth.rs`. **Pool**: 2.
 
 ## Contract
-- Input: `VideoMetadata`. Output (handoff to Cleaner): `UploaderState { all_uploaded, any_uploaded, errors: { youtube, tiktok } }`.
-- If no uploader succeeded the agent returns an error (retry with backoff, then the workflow fails).
-- Metadata comes from the workflow's profile: `publish.youtube_category`, `tags`, `description`, `made_for_kids`. Never hardcode them.
+- Input: `FinalCut`. Output (handoff to Cleaner): `DistributionReport { all_uploaded, any_uploaded, errors: { youtube, tiktok } }`.
+- If no uploader succeeded the agent returns an error (retry with backoff, then the production fails).
+- Metadata comes from the production's profile: `publish.youtube_category`, `tags`, `description`, `made_for_kids`. Never hardcode them.
 
 ## YouTube
 - Title: `youtube_title` removes `<` `>`, trims, max 100 chars, `Untitled` if empty. Privacy is always `public`.

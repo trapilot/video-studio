@@ -1,4 +1,4 @@
-CREATE TABLE `workflows` (
+CREATE TABLE `productions` (
     `id` TEXT PRIMARY KEY,
     `profile` TEXT NOT NULL,
     `task` TEXT NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE `workflows` (
 
 CREATE TABLE IF NOT EXISTS `jobs` (
     `id` TEXT PRIMARY KEY,
-    `workflow_id` TEXT NOT NULL,
+    `production_id` TEXT NOT NULL,
     `agent` TEXT NOT NULL,
     `parent` TEXT NOT NULL,
     `version` TEXT NOT NULL,
@@ -46,10 +46,10 @@ CREATE TABLE IF NOT EXISTS `oauth_tokens` (
 );
 
 
-CREATE INDEX `idx_workflow_profile_created` ON `workflows`(`profile`, `created_at`);
+CREATE INDEX `idx_production_profile_created` ON `productions`(`profile`, `created_at`);
 
 CREATE INDEX `idx_jobs_agent_status` ON `jobs`(`agent`, `status`);
 
-CREATE INDEX `idx_jobs_workflow` ON `jobs`(`workflow_id`);
+CREATE INDEX `idx_jobs_production` ON `jobs`(`production_id`);
 
 CREATE INDEX `idx_jobs_parent` ON `jobs`(`parent`);

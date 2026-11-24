@@ -18,7 +18,7 @@ impl Agent for PublisherAgent {
         println!("📤 [Publisher] Publishing video...");
         let profile = job_profile(state, job).await?;
         
-        let video_metadata: VideoMetadata =
+        let final_cut: FinalCut =
             serde_json::from_str(&job.payload)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
@@ -37,8 +37,8 @@ impl Agent for PublisherAgent {
         let results = state.services.uploaders
             .upload_all(
                 &state.services.db,
-                &video_metadata.video_path,
-                &video_metadata.title,
+                &final_cut.video_path,
+                &final_cut.title,
                 configs
             )
             .await;
@@ -60,21 +60,21 @@ impl Agent for PublisherAgent {
             }
         }
         
-        let publish_state = uploader::UploaderState {
+        let report = uploader::DistributionReport {
             all_uploaded: success_count == results.len() && results.len() > 0,
             any_uploaded: success_count > 0,
             errors: publish_errors,
-            output_dir: std::path::Path::new(&video_metadata.video_path)
+            output_dir: std::path::Path::new(&final_cut.video_path)
                 .parent()
                 .map(|p| p.to_string_lossy().to_string()),
         };
         
-        if !publish_state.any_uploaded {
+        if !report.any_uploaded {
             return Err(AgentError::Execute("Upload error....".to_string()));
         }
 
         let payload =
-            serde_json::to_string(&publish_state)
+            serde_json::to_string(&report)
             .map_err(|e| AgentError::Encode(e.to_string()))?;
 
         state.services.db

@@ -102,15 +102,15 @@ impl Agent for PlannerAgent {
             .await
             .map_err(|e| AgentError::Execute(e.to_string()))?;
 
-        let mut story_context: StoryContext =
+        let mut brief: Brief =
             serde_json::from_str(&resp)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
-        validate_story_context(profile, &mut story_context)?;
-        println!("🧠 [Planner] Topic will be \"{}\"", story_context.topic);
+        validate_brief(profile, &mut brief)?;
+        println!("🧠 [Planner] Topic will be \"{}\"", brief.topic);
 
         let payload =
-            serde_json::to_string(&story_context)
+            serde_json::to_string(&brief)
                 .map_err(|e| AgentError::Encode(e.to_string()))?;
 
         state.services.db
@@ -119,7 +119,7 @@ impl Agent for PlannerAgent {
             .map_err(|e| AgentError::Handoff(e.to_string()))?;
 
         state.services.db
-            .save_topic(&job.workflow_id, story_context.topic.clone())
+            .save_topic(&job.production_id, brief.topic.clone())
             .await
             .map_err(|e| AgentError::Handoff(e.to_string()))?;
 
@@ -162,7 +162,7 @@ impl PlannerAgent {
     }
 }
 /// Reject an unusable plan (so the job is retried) and canonicalize character names.
-fn validate_story_context(profile: &StudioProfile, ctx: &mut StoryContext) -> Result<(), AgentError> {
+fn validate_brief(profile: &StudioProfile, ctx: &mut Brief) -> Result<(), AgentError> {
     ctx.topic = ctx.topic.trim().to_string();
     if ctx.topic.is_empty() {
         return Err(AgentError::Execute("Planner returned an empty topic".to_string()));
@@ -198,8 +198,8 @@ fn validate_story_context(profile: &StudioProfile, ctx: &mut StoryContext) -> Re
 mod tests {
     use super::*;
 
-    fn ctx(main: &str, spot: &[&str], sup: &[&str]) -> StoryContext {
-        StoryContext {
+    fn ctx(main: &str, spot: &[&str], sup: &[&str]) -> Brief {
+        Brief {
             topic: " Why is the sky blue? ".into(),
             main_character: main.into(),
             spotlight_characters: spot.iter().map(|s| s.to_string()).collect(),
@@ -213,17 +213,17 @@ mod tests {
         let kids = profile_by_id("kids_edu").unwrap();
 
         let mut ok = ctx("Bin", &["Bin"], &["Nam"]);
-        validate_story_context(kids, &mut ok).unwrap();
+        validate_brief(kids, &mut ok).unwrap();
         assert_eq!(ok.topic, "Why is the sky blue?");
         assert_eq!(ok.main_character, "Quốc Khánh");
         assert_eq!(ok.spotlight_characters, vec!["Quốc Khánh"]);
 
-        assert!(validate_story_context(kids, &mut ctx("Nam", &[], &[])).is_err(), "not a spotlight character");
-        assert!(validate_story_context(kids, &mut ctx("Bin", &[], &["Ghost"])).is_err(), "unknown name");
+        assert!(validate_brief(kids, &mut ctx("Nam", &[], &[])).is_err(), "not a spotlight character");
+        assert!(validate_brief(kids, &mut ctx("Bin", &[], &["Ghost"])).is_err(), "unknown name");
 
         let explainer = profile_by_id("explainer").unwrap();
         let mut narr = ctx("Someone", &["X"], &["Y"]);
-        validate_story_context(explainer, &mut narr).unwrap();
+        validate_brief(explainer, &mut narr).unwrap();
         assert!(narr.main_character.is_empty() && narr.spotlight_characters.is_empty());
     }
 }

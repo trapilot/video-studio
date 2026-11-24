@@ -7,12 +7,12 @@ use crate::agent::*;
 use crate::models::*;
 
 
-pub struct ManagerAgent;
+pub struct ProducerAgent;
 
 #[async_trait]
-impl Agent for ManagerAgent {
+impl Agent for ProducerAgent {
     async fn run(&self, _state: &Arc<AppState>, job: &Job) -> Result<(), AgentError> {
-        println!("Running workflow...");
+        println!("Running production...");
         Ok(())
     }
 }

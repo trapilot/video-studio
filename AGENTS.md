@@ -6,20 +6,22 @@ Video Studio is a job-queue pipeline of single-purpose agents. It produces short
 
 Agents never call each other and share no in-memory state. Each agent reads one JSON payload from its job, does one piece of work and hands the result to the next agent by creating the next job (`db.handoff_job`). All state lives in SQLite (`data_history.db`).
 
+A **production** is one video from topic to upload. It is made of jobs, one per agent step, linked by `production_id`.
+
 ```text
-Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
-           StoryContext  Storyboard  Timeline  VideoMetadata  UploaderState
+Producer -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
+           Brief  Storyboard  Timeline  FinalCut  DistributionReport
 ```
 
 ---
 
 ## Engine
 
-`WorkflowEngine` (`src/workflow.rs`) owns one `AgentEntry` (an `Agent` implementation and an `AgentPool`) per `AgentType` (`src/agent.rs`).
+`Studio` (`src/studio.rs`) owns one `AgentEntry` (an `Agent` implementation and an `AgentPool`) per `AgentType` (`src/agent.rs`).
 
 | Agent | Pool concurrency |
 |---|---|
-| Manager | 1 |
+| Producer | 1 |
 | Planner | 10 |
 | Writer | 2 |
 | Builder | 1 |
@@ -27,27 +29,27 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 | Publisher | 2 |
 | Cleaner | 1 |
 
-**Scheduler task** (`start_scheduler`): loops every 30 seconds. If `db.agent_is_busy(Planner)` is false (no Planner job pending or processing) and `db.count_workflows_today()` (local day) is below `config.workflow_per_day` (3), it calls `db.create_workflow(profile.id, "Create {profile.format}")` for the active profile (`STUDIO_PROFILE`) and creates the first job: parent `Manager`, agent `Planner`, payload `"Create new workflow"`. The Manager agent is therefore a placeholder that no job addresses.
+**Scheduler task** (`start_scheduler`): loops every 30 seconds. If `db.agent_is_busy(Planner)` is false (no Planner job pending or processing) and `db.count_productions_today()` (local day) is below `config.productions_per_day` (3), it calls `db.create_production(profile.id, "Create {profile.format}")` for the active profile (`STUDIO_PROFILE`) and creates the first job: parent `Producer`, agent `Planner`, payload `"Create new production"`. The Producer agent is therefore a placeholder that no job addresses.
 
 **Dispatch loop** (`dispatch`): calls `db.claim_job()`, which atomically moves the oldest pending job (`version = APP_VERSION`, `locked_at IS NULL`, `run_after` empty or past) to `processing`. It looks up the agent entry and calls `AgentPool::try_spawn`. If the pool is full the job goes back with `db.release_job` (retry count untouched). With no job the loop sleeps 5 s, and 1 s between jobs.
 
 **AgentPool** (`src/agent.rs`): a semaphore of the pool's size. `try_spawn` runs `agent.run(state, job)` in a task. On `Err`:
 
 - `agent::should_retry(retry_count, max_retry)`, i.e. `retry_count + 1 < max_retry` (`max_retry` = 3 total attempts): `db.retry_job` sets the job back to `pending`, increments `retry_count` and sets `run_after` to now plus `db::retry_delay_secs(retry_count)` (60 s, doubling, capped at 3600 s). The error text is stored in `jobs.result`.
-- otherwise: `db.fail_job` marks the job `failed` and the workflow `failed`.
+- otherwise: `db.fail_job` marks the job `failed` and the production `failed`.
 
 **Recovery**: at startup `main.rs` calls `db.recover_interrupted_jobs()`, which turns every `processing` job back into `pending`.
 
-**Completion**: the Cleaner marks the workflow `completed`.
+**Completion**: the Cleaner marks the production `completed`.
 
-**Handoff**: `db.handoff_job(job, next, payload)` inserts a job `{workflow_id, parent: job.agent, agent: next, payload}` and completes the current job with the payload as its result.
+**Handoff**: `db.handoff_job(job, next, payload)` inserts a job `{production_id, parent: job.agent, agent: next, payload}` and completes the current job with the payload as its result.
 
 ### Tables (`migrations/schema_01.sql`)
 
 | Table | Holds |
 |---|---|
-| `workflows` | `id`, `profile`, `task`, `topic`, `status` (`pending`/`running`/`completed`/`failed`) |
-| `jobs` | `id`, `workflow_id`, `agent`, `parent`, `version`, `status`, `payload`, `result`, `retry_count`, `max_retry` (3), `locked_at`, `run_after` |
+| `productions` | `id`, `profile`, `task`, `topic`, `status` (`pending`/`running`/`completed`/`failed`) |
+| `jobs` | `id`, `production_id`, `agent`, `parent`, `version`, `status`, `payload`, `result`, `retry_count`, `max_retry` (3), `locked_at`, `run_after` |
 | `providers` | reserved, not read by code |
 | `oauth_tokens` | OAuth tokens, `provider` is the primary key (`youtube`) |
 
@@ -58,25 +60,25 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 | Type | File | Purpose |
 |---|---|---|
 | `AgentType`, `Agent`, `AgentPool`, `AgentError` | `src/agent.rs` | Agent contract. `AgentError` has `Handoff`, `Execute`, `Encode`, `Decode`. |
-| `job_profile(state, job)` | `src/agent.rs` | The `&'static StudioProfile` stored with the job's workflow. |
-| `Job`, `Workflow`, `JobStatus`, `WorkflowStatus` | `src/models/job.rs` | Queue rows. `models::workflow_path(created_at, id)` builds the output folder; agents get it with `db.workflow_output_path` (dated by the workflow's creation). |
-| `StoryContext`, `Storyboard`, `Shot`, `Actor`, `Dialogue`, `Environment`, `Camera` | `src/entities/movie.rs` | Planner and Writer output. |
-| `Timeline`, `Clip`, `VideoMetadata` | `src/entities/movie.rs` | Builder and Renderer output. |
-| `Motion`, `Transition`, `Position` | `src/entities/movie.rs` | LLM-facing enums (lowercase names), each with an `ALL` list. |
-| `UploaderState`, `UploaderError`, `Channel`, `ChannelConfig` | `src/uploader.rs` | Publisher output and upload config. |
+| `job_profile(state, job)` | `src/agent.rs` | The `&'static StudioProfile` stored with the job's production. |
+| `Job`, `Production`, `JobStatus`, `ProductionStatus` | `src/models/job.rs` | Queue rows. `models::production_path(created_at, id)` builds the output folder; agents get it with `db.production_output_path` (dated by the production's creation). |
+| `Brief`, `Storyboard`, `Shot`, `Actor`, `Dialogue`, `Environment`, `Camera` | `src/entities/storyboard.rs` | Planner and Writer output. |
+| `Timeline`, `Clip`, `FinalCut` | `src/entities/storyboard.rs` | Builder and Renderer output. |
+| `Motion`, `Transition`, `Position` | `src/entities/storyboard.rs` | LLM-facing enums (lowercase names), each with an `ALL` list. |
+| `DistributionReport`, `UploaderError`, `Channel`, `ChannelConfig` | `src/uploader.rs` | Publisher output and upload config. |
 | `StudioProfile`, `PublishProfile` | `src/entities/profile.rs` | Per-video-type settings. |
 | `Character` | `src/entities/character.rs` | Cast member loaded from TOML. |
-| `AppState` | `src/main.rs` | `services` (db, providers, uploaders), `config`, `profile` (profile for new workflows). |
+| `AppState` | `src/main.rs` | `services` (db, providers, uploaders), `config`, `profile` (profile for new productions). |
 
 ---
 
 ## Agents
 
-### Manager
+### Producer
 
-- **File**: `src/agents/manager.rs`
-- **Purpose**: reserved for workflow orchestration. Today it only prints a line.
-- **Input / output**: none. The scheduler creates the workflow and the Planner job itself.
+- **File**: `src/agents/producer.rs`
+- **Purpose**: reserved for production orchestration. Today it only prints a line.
+- **Input / output**: none. The scheduler creates the production and the Planner job itself.
 
 ### Planner
 
@@ -86,11 +88,11 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 - **Provider**: Gemini (`ProviderRequest::Script`, JSON mode).
 - **Profile usage**: `name`, `format`, `audience`, `tone`, `language`, `topic_brief`; the cast (`enabled_cast`) for the spotlight and relation character lists.
 - **Process**:
-  1. Reads topics of this profile from the last 30 days (`get_recent_topics`, failed workflows excluded) to avoid repeats.
+  1. Reads topics of this profile from the last 30 days (`get_recent_topics`, failed productions excluded) to avoid repeats.
   2. With a cast, lists spotlight characters (name, topic domain, age, personality, relations) and relation characters (name, profession, age, role, personality, relations).
-  3. Parses the answer as `StoryContext` and runs `validate_story_context`: the topic must be non-empty. With a cast, `main_character` must be an enabled spotlight character, and every listed name must resolve with `profile.character()` (full name or nickname). Names are stored as full names. Without a cast all character fields are cleared.
-  4. Hands off to the Writer, then saves the topic on the workflow (`save_topic`).
-- **Output**: `StoryContext`
+  3. Parses the answer as `Brief` and runs `validate_brief`: the topic must be non-empty. With a cast, `main_character` must be an enabled spotlight character, and every listed name must resolve with `profile.character()` (full name or nickname). Names are stored as full names. Without a cast all character fields are cleared.
+  4. Hands off to the Writer, then saves the topic on the production (`save_topic`).
+- **Output**: `Brief`
 
 ```json
 {
@@ -105,7 +107,7 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 
 - **File**: `src/agents/writer.rs`
 - **Purpose**: turn the topic into a storyboard of short shots.
-- **Input**: `StoryContext`
+- **Input**: `Brief`
 - **Provider**: Gemini (JSON mode).
 - **Profile usage**: `name`, `format`, `audience`, `tone`, `visual_style`, `language`, `duration_secs`, `shot_count`, `content_rules`, and the cast.
 - **Process**:
@@ -159,9 +161,9 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 ```json
 {
   "title": "The Blue Sky",
-  "final_path": "./output/20260101/<workflow_id>/final_video.mp4",
-  "video_path": "./output/20260101/<workflow_id>/video.mp4",
-  "subtitle_path": "./output/20260101/<workflow_id>/subtitle.ass",
+  "final_path": "./output/20260101/<production_id>/final_video.mp4",
+  "video_path": "./output/20260101/<production_id>/video.mp4",
+  "subtitle_path": "./output/20260101/<production_id>/subtitle.ass",
   "clips": [
     {
       "shot_id": 1,
@@ -192,20 +194,20 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
   3. For each clip without `shot_N/video.mp4`: scales and center-crops the image to the frame, applies the `zoompan` filter of the shot's `Motion`, delays the speech by half the transition and pads it with silence, encodes to `video.mp4.part` and renames.
   4. Joins the clips: one clip is re-muxed; several are joined with `xfade` (the previous clip's transition) and `acrossfade` of `Transition::fade_between`.
   5. Writes `subtitle.ass` (one line per clip between `start_time` and `end_time`) and burns it in, producing `final_video.mp4` through `.part`.
-- **Output**: `VideoMetadata`
+- **Output**: `FinalCut`
 
 ```json
-{ "title": "The Blue Sky", "video_path": "./output/20260101/<workflow_id>/final_video.mp4" }
+{ "title": "The Blue Sky", "video_path": "./output/20260101/<production_id>/final_video.mp4" }
 ```
 
 ### Publisher
 
 - **File**: `src/agents/publisher.rs`
 - **Purpose**: upload the finished video.
-- **Input**: `VideoMetadata`
+- **Input**: `FinalCut`
 - **Profile usage**: `publish.youtube_category`, `publish.tags`, `publish.description`, `publish.made_for_kids`.
 - **Process**: builds a YouTube config from the profile and a TikTok config, then `UploaderManager::upload_all` runs the registered uploaders concurrently. Only YouTube is registered (`main.rs`), so TikTok is skipped. The YouTube uploader gets a token with `oauth::get_youtube_token` (refreshing it when it expires within 5 minutes), sanitizes the title (no `<` or `>`, at most 100 characters, `Untitled` if empty) and uploads with `privacyStatus: "public"`. If no uploader succeeded the agent returns an error (retry). Per-channel errors are recorded in the output.
-- **Output**: `UploaderState`
+- **Output**: `DistributionReport`
 
 ```json
 { "all_uploaded": true, "any_uploaded": true, "errors": { "youtube": null, "tiktok": null } }
@@ -214,9 +216,9 @@ Manager -> Planner -> Writer -> Builder -> Renderer -> Publisher -> Cleaner
 ### Cleaner
 
 - **File**: `src/agents/cleaner.rs`
-- **Purpose**: close the workflow.
-- **Input**: `UploaderState`
-- **Process**: prints any per-channel error, deletes `shot_*/`, `video.mp4` and leftover `.part` files in `UploaderState.output_dir` (only inside `./output/.../<workflow_id>`, skipped when `cleanup.keep_intermediates`), completes its job with `DONE` and sets the workflow status to `completed`.
+- **Purpose**: close the production.
+- **Input**: `DistributionReport`
+- **Process**: prints any per-channel error, deletes `shot_*/`, `video.mp4` and leftover `.part` files in `DistributionReport.output_dir` (only inside `./output/.../<production_id>`, skipped when `cleanup.keep_intermediates`), completes its job with `DONE` and sets the production status to `completed`.
 - **Output**: none.
 
 ---
@@ -239,8 +241,8 @@ Agents use `manager.acquire(&Provider::X)` then `guard.call(request)`. `acquire`
 
 A `StudioProfile` is one kind of video. See the README for the field table and `src/entities/profile.rs` for the built-ins `kids_edu` (default, family cast, made for kids, category 27) and `explainer` (narrator-only, category 28).
 
-- `STUDIO_PROFILE` selects the profile of **new** workflows. An unknown id stops startup.
-- `workflows.profile` stores the id. Agents call `job_profile(state, job)` and never read `state.profile`, which is only for creating workflows.
+- `STUDIO_PROFILE` selects the profile of **new** productions. An unknown id stops startup.
+- `productions.profile` stores the id. Agents call `job_profile(state, job)` and never read `state.profile`, which is only for creating productions.
 - The cast is data: `data/characters/<profile_id>/*.toml` (`STUDIO_DATA_DIR` overrides `./data`), loaded once at startup by `entities::character::init`. See `data/characters/README.md`.
 - Helpers: `StudioProfile::cast()`, `enabled_cast()`, `has_cast()`, `character(name)` (full name or nickname, enabled characters only), `profile_by_id`, `active_profile`.
 
@@ -249,20 +251,20 @@ A `StudioProfile` is one kind of video. See the README for the field table and `
 ## Design principles
 
 1. **One responsibility per agent.** Plan, write, build, render, publish, clean up. Do not merge stages.
-2. **Agents communicate only through job payloads.** The payload is a serialized struct (`StoryContext`, `Storyboard`, `Timeline`, `VideoMetadata`, `UploaderState`). Anything an agent needs about the workflow, such as its profile, is read from the database with the workflow id.
+2. **Agents communicate only through job payloads.** The payload is a serialized struct (`Brief`, `Storyboard`, `Timeline`, `FinalCut`, `DistributionReport`). Anything an agent needs about the production, such as its profile, is read from the database with the production id.
 3. **Providers sit behind `ProviderManager`.** Agents ask for a `Provider` and send a `ProviderRequest`. They do not build HTTP calls to LLM or image APIs.
 4. **Profile-driven and format-agnostic.** Audience, tone, language, visual style, length, rules and publish metadata come from the profile. Characters come from data files. Agent code does not name a specific show or character.
-5. **Errors, not panics.** Agents return `AgentError`. Never `unwrap()` LLM output, provider responses or files. A returned error becomes a retry with backoff and finally a failed workflow.
+5. **Errors, not panics.** Agents return `AgentError`. Never `unwrap()` LLM output, provider responses or files. A returned error becomes a retry with backoff and finally a failed production.
 6. **Idempotent and atomic.** A retried job must be safe to run again: skip finished assets, write files through `.part` and rename.
 
 ---
 
 ## Future agents
 
-Ideas that fit the contract (a new `AgentType`, a payload struct, a registry entry in `WorkflowEngine::new`, a handoff from the previous agent):
+Ideas that fit the contract (a new `AgentType`, a payload struct, a registry entry in `Studio::new`, a handoff from the previous agent):
 
 - **Reviewer** between Writer and Builder: score or reject a storyboard (safety, length) before spending image credits.
 - **Thumbnailer**: generate a cover image from the storyboard.
 - **Analytics**: read back view counts and feed topic selection.
-- **Cleaner extensions**: delete or archive `output/` folders of completed workflows.
-- **Manager**: move workflow creation from the scheduler into the Manager agent.
+- **Cleaner extensions**: delete or archive `output/` folders of completed productions.
+- **Producer**: move production creation from the scheduler into the Producer agent.

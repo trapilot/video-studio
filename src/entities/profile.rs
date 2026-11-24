@@ -6,9 +6,9 @@
 //! `data/characters/{profile id}/` (see `character.rs`). Agent code itself is
 //! format-agnostic.
 //!
-//! The profile for new workflows is chosen with the `STUDIO_PROFILE` env var
+//! The profile for new productions is chosen with the `STUDIO_PROFILE` env var
 //! (matched against `StudioProfile::id`). If it is unset, `DEFAULT_PROFILE_ID`
-//! is used. Each workflow stores its profile id, so in-flight work keeps the
+//! is used. Each production stores its profile id, so in-flight work keeps the
 //! profile it started with.
 //!
 //! To add a new kind of video, append a `StudioProfile` to `PROFILES` (and,

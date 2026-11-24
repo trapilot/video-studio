@@ -1,7 +1,7 @@
 pub mod character;
-pub mod movie;
+pub mod storyboard;
 pub mod profile;
 
 pub use character::*;
-pub use movie::*;
+pub use storyboard::*;
 pub use profile::*;

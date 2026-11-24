@@ -126,7 +126,7 @@ impl Transition {
 
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct VideoMetadata {
+pub struct FinalCut {
     pub title: String,
     pub video_path: String,
 }
@@ -141,7 +141,7 @@ pub struct Timeline {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-pub struct StoryContext {
+pub struct Brief {
     pub topic: String,
     pub main_character: String,
     pub spotlight_characters: Vec<String>,

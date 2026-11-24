@@ -7,10 +7,10 @@ pub struct Config {
     pub video: VideoConfig,
     pub voice: VoiceConfig,
     pub tts: TtsConfig,
-    pub diffusion: DiffusionParams,
+    pub image: ImageConfig,
     pub cleanup: CleanupConfig,
-    pub workflow_per_day: i64,
-    // pub workflow_gap_minutes: i64,
+    pub productions_per_day: i64,
+    // pub production_gap_minutes: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,7 +38,7 @@ pub struct TtsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct DiffusionParams {
+pub struct ImageConfig {
     pub num_steps: u32,
     pub guidance: f32
 }
@@ -59,8 +59,8 @@ pub fn build_config() -> Config {
             fps: 25,
             burn_subtitles: true,
         },
-        workflow_per_day: 3,
-        // workflow_gap_minutes: 15,
+        productions_per_day: 3,
+        // production_gap_minutes: 15,
         voice: VoiceConfig {
             base_voice: "pNInz6obpgDQGcFmaJgB".to_string(),
         },
@@ -69,7 +69,7 @@ pub fn build_config() -> Config {
             stability: 0.8,
             similarity_boost: 0.75,
         },
-        diffusion: DiffusionParams {
+        image: ImageConfig {
             num_steps: 4,
             guidance: 3.5, 
         },

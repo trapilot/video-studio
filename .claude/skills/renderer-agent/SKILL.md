@@ -5,10 +5,10 @@ description: Work on the Renderer agent (src/agents/renderer.rs): FFmpeg clips, 
 
 # Renderer agent
 
-**Code**: `src/agents/renderer.rs`; filters in `Motion::ffmpeg_filter` and `Transition` (`src/entities/movie.rs`). **Pool**: 1.
+**Code**: `src/agents/renderer.rs`; filters in `Motion::ffmpeg_filter` and `Transition` (`src/entities/storyboard.rs`). **Pool**: 1.
 
 ## Contract
-- Input: `Timeline`. Output (handoff to Publisher): `VideoMetadata { title, video_path }` where `video_path` is `final_video.mp4`.
+- Input: `Timeline`. Output (handoff to Publisher): `FinalCut { title, video_path }` where `video_path` is `final_video.mp4`.
 - Needs `ffmpeg` and `ffprobe` on PATH (`ffmpeg_check`). Empty timeline is an error.
 
 ## How it works

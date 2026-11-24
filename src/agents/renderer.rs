@@ -20,13 +20,13 @@ impl Agent for RendererAgent {
             serde_json::from_str(&job.payload)
             .map_err(|e| AgentError::Decode(e.to_string()))?;
 
-        let video_metadata: VideoMetadata = self
+        let final_cut: FinalCut = self
             .execute(&timeline, &state.config.video)
             .await
             .map_err(|e| AgentError::Execute(e.to_string()))?;
 
         let payload =
-            serde_json::to_string(&video_metadata)
+            serde_json::to_string(&final_cut)
             .map_err(|e| AgentError::Encode(e.to_string()))?;
 
         state.services.db
@@ -43,14 +43,14 @@ impl RendererAgent {
         &self,
         timeline: &Timeline,
         video: &VideoConfig,
-    ) -> Result<VideoMetadata, String> {
+    ) -> Result<FinalCut, String> {
         ffmpeg_check()?;
 
         if timeline.clips.is_empty() {
             return Err("Nothing to render: timeline has no clips".to_string());
         }
 
-        let metadata = VideoMetadata {
+        let metadata = FinalCut {
             title: timeline.title.clone(),
             video_path: timeline.final_path.clone(),
         };

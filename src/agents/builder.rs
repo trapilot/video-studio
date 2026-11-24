@@ -21,7 +21,7 @@ pub struct ShotAssets {
     pub video_path: String,
 }
 
-pub struct RenderedShot {
+pub struct ProducedShot {
     pub shot_id: u32,
     pub image_path: String,
     pub audio_path: String,
@@ -64,7 +64,7 @@ impl Agent for BuilderAgent {
 
         let profile = job_profile(state, job).await?;
         let output_path = state.services.db
-            .workflow_output_path(&job.workflow_id)
+            .production_output_path(&job.production_id)
             .await
             .map_err(|e| AgentError::Execute(e.to_string()))?;
 
@@ -97,7 +97,7 @@ impl BuilderAgent {
         storyboard: &Storyboard,
         target_path: String
     ) -> Result<Timeline, String> {
-        // One seed per workflow: the same prompt then gives the same image on any
+        // One seed per production: the same prompt then gives the same image on any
         // Cloudflare account/key, so retries and key rotation stay consistent.
         let seed = stable_seed(&target_path);
 
@@ -140,7 +140,7 @@ impl BuilderAgent {
                     
                     let duration = get_audio_duration(&assets.audio_path).await?;
 
-                    Ok::<_, String>(RenderedShot {
+                    Ok::<_, String>(ProducedShot {
                         shot_id: shot.shot_id,
                         image_path: assets.image_path,
                         audio_path: assets.audio_path,
@@ -159,19 +159,19 @@ impl BuilderAgent {
             .collect::<Vec<_>>();
         
 
-        let mut rendered_shots = Vec::new();
+        let mut produced_shots = Vec::new();
 
         for handle in handles {
             let shot = handle
                 .await
                 .map_err(|e| e.to_string())??;
 
-            rendered_shots.push(shot);
+            produced_shots.push(shot);
         }
 
-        rendered_shots.sort_by_key(|v| v.shot_id);
+        produced_shots.sort_by_key(|v| v.shot_id);
         
-        if rendered_shots.is_empty() {
+        if produced_shots.is_empty() {
             return Err("No shots to build".to_string());
         }
 
@@ -186,7 +186,7 @@ impl BuilderAgent {
         let mut prev_duration: Option<f64> = None;
         let mut clips = Vec::new();
     
-        for shot in rendered_shots {
+        for shot in produced_shots {
             let duration = shot.duration + transition_duration;
             // Overlap with the previous clip (none for the first one).
             let fade = prev_duration.map(|p| Transition::fade_between(p, duration)).unwrap_or(0.0);
@@ -233,8 +233,8 @@ async fn text_to_image(
             provider::ImageRequest {
                 prompt: prompt,
                 seed: Some(seed),
-                num_steps: Some(config.diffusion.num_steps),
-                guidance: Some(config.diffusion.guidance),
+                num_steps: Some(config.image.num_steps),
+                guidance: Some(config.image.guidance),
                 width: None,
                 height: None,
             },

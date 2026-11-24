@@ -13,7 +13,7 @@ struct AgentEntry {
     agent: Arc<dyn agent::Agent>,
 }
 
-pub struct WorkflowEngine {
+pub struct Studio {
     state: Arc<AppState>,
     registry: HashMap<agent::AgentType, AgentEntry>,
 }
@@ -29,15 +29,15 @@ impl AgentEntry {
     }
 }
 
-impl WorkflowEngine {
+impl Studio {
     pub fn new(state: Arc<AppState>) -> Self {
         let mut registry = HashMap::new();
 
         registry.insert(
-            agent::AgentType::Manager,
+            agent::AgentType::Producer,
             AgentEntry {
                 pool: agent::AgentPool::new(1),
-                agent: Arc::new(agents::ManagerAgent),
+                agent: Arc::new(agents::ProducerAgent),
             },
         );
         registry.insert(
@@ -121,26 +121,26 @@ impl WorkflowEngine {
         tokio::spawn(async move {
             loop {
                 let db = &state.services.db;
-                let workflow_per_day = state.config.workflow_per_day;
+                let productions_per_day = state.config.productions_per_day;
 
                 let planner_busy =
                     db.agent_is_busy(agent::AgentType::Planner)
                     .await
                     .unwrap_or(true);
                 
-                let today_count = db.count_workflows_today()
+                let today_count = db.count_productions_today()
                     .await
                     .unwrap_or(0);
 
-                if !planner_busy && today_count < workflow_per_day {
-                    match db.create_workflow(state.profile.id, format!("Create {}", state.profile.format)).await {
-                        Ok(workflow_id) => {
+                if !planner_busy && today_count < productions_per_day {
+                    match db.create_production(state.profile.id, format!("Create {}", state.profile.format)).await {
+                        Ok(production_id) => {
 
                             let job = db.create_job(
-                                workflow_id,
-                                agent::AgentType::Manager,
+                                production_id,
+                                agent::AgentType::Producer,
                                 agent::AgentType::Planner,
-                                "Create new workflow".to_string(),
+                                "Create new production".to_string(),
                             ).await;
 
                             match job {
@@ -148,7 +148,7 @@ impl WorkflowEngine {
                                 Err(e) => println!("🔴 Job ERR: {}", e)
                             }
                         }
-                        Err(e) => println!("🔴 Workflow ERR: {}", e)
+                        Err(e) => println!("🔴 Production ERR: {}", e)
                     }
                 }
                 

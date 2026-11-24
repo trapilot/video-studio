@@ -12,7 +12,7 @@ A profile is one kind of video. Agent code is format-agnostic: do not edit agent
 2. Cast (optional): create `data/characters/<id>/` with `NN_name.toml` files, at least one `spotlight = true`. See `data/characters/README.md`. Narrator-only: create nothing.
 3. `made_for_kids: true` for anything aimed at children.
 4. `cargo check` and `cargo test` (a test validates ids, durations and shot counts; the character loader test checks the repo data).
-5. Select with `STUDIO_PROFILE=<id>`. Unknown ids stop startup. Only new workflows use it; running workflows keep their stored profile.
+5. Select with `STUDIO_PROFILE=<id>`. Unknown ids stop startup. Only new productions use it; running productions keep their stored profile.
 
 ## Guidance
 - `format` completes "producing ...". `topic_brief` completes "Create ...". Both are pasted into prompts.
