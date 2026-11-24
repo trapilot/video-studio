@@ -5,6 +5,17 @@ use crate::provider::*;
 
 pub struct CFWorkerClient;
 
+/// Cloudflare API error codes in a response body: `{"errors":[{"code":10000,...}]}`.
+fn cf_error_codes(body: &str) -> Vec<i64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["errors"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| e["code"].as_i64())
+        .collect()
+}
+
 #[async_trait]
 impl ProviderClient for CFWorkerClient {
     async fn call(
@@ -38,7 +49,23 @@ impl ProviderClient for CFWorkerClient {
         body: &str,
     ) -> bool {
         status == reqwest::StatusCode::UNAUTHORIZED
-            || body.contains("10000")
+            || status == reqwest::StatusCode::FORBIDDEN
+            || cf_error_codes(body).contains(&10000) // "Authentication error"
+    }
+
+    /// Workers AI needs an account id per key (`CF_WORKER_ACCOUNT_n`).
+    fn requires_account(&self) -> bool {
+        true
+    }
+
+    /// 7003 "Could not route ... object identifier is invalid": the account id
+    /// paired with this key is wrong. Another key/account may work.
+    fn is_key_specific_error(
+        &self,
+        _status: u16,
+        body: &str,
+    ) -> bool {
+        cf_error_codes(body).contains(&7003)
     }
 
     fn provider(&self) -> Provider {
@@ -134,5 +161,31 @@ impl CFWorkerClient {
 
             _ => Err(ProviderError::NotSupported(format!("{}", Self.provider().clone()))),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_cloudflare_errors_by_code() {
+        let auth = r#"{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}"#;
+        assert!(matches!(
+            CFWorkerClient.ensure_success(reqwest::StatusCode::BAD_REQUEST, auth),
+            Err(ProviderError::RequestUnauthorized { .. })
+        ));
+
+        let route = r#"{"result":null,"success":false,"errors":[{"code":7003,"message":"Could not route to /client/v4/accounts/ai/run/..."}]}"#;
+        assert!(matches!(
+            CFWorkerClient.ensure_success(reqwest::StatusCode::NOT_FOUND, route),
+            Err(ProviderError::KeyRejected { .. })
+        ));
+
+        // A number that merely contains "10000" is not an auth error.
+        let other = r#"{"success":false,"errors":[{"code":5006,"message":"prompt longer than 100000 chars"}]}"#;
+        assert!(matches!(
+            CFWorkerClient.ensure_success(reqwest::StatusCode::BAD_REQUEST, other),
+            Err(ProviderError::Http { .. })
+        ));
     }
 }

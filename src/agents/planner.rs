@@ -138,7 +138,7 @@ impl PlannerAgent {
         let guard = match state.services.providers.acquire(&provider).await {
             Some(v) => v,
             None => {
-                return Err(format!("{} is acquired", &provider.to_string()));
+                return Err(format!("{} unavailable: no usable GEMINI_KEY_n (or all keys blocked)", provider));
             }
         };
 

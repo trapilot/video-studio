@@ -203,8 +203,8 @@ On the first run, if no YouTube token is stored in the database, the studio star
 | `STUDIO_DATA_DIR` | `entities::character::init` | Folder that holds `characters/<profile_id>/*.toml`. Default `./data`. |
 | `GEMINI_FALLBACK_MODEL` | Gemini provider | Optional. Model tried when the main model answers "high demand" / 503 UNAVAILABLE. |
 | `GEMINI_MODEL` | Gemini provider | Model for every Gemini key. Default `gemini-3.8-flash`. Change it when Google retires a model (error `NOT_FOUND ... no longer available`). |
-| `GEMINI_KEY_1`, `GEMINI_KEY_2`, ... | Gemini provider | Script LLM keys. Numbered from 1 with no gaps: loading stops at the first missing number. |
-| `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | Workers AI token and account id. Each key needs its own account id. |
+| `GEMINI_KEY_1`, `GEMINI_KEY_2`, ... | Gemini provider | Script LLM keys. Numbered from 1 with no gaps: loading stops at the first missing number. Empty values (`KEY_2=`) are skipped with a warning, so placeholders are harmless. |
+| `CF_WORKER_KEY_n` and `CF_WORKER_ACCOUNT_n` | Cloudflare provider | An **API Token** with the *Workers AI* permission (not the 32-character Global API Key, which Workers AI rejects as unauthorized) and that account's 32-character account id. A key without an account id is skipped at startup. |
 | `ELEVEN_LABS_KEY_n` | ElevenLabs provider | Speech fallback used by the Builder when Piper is not installed. |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` | `oauth.rs` | Google OAuth client, used on the first run to authorize and later to refresh tokens. |
 | `YOUTUBE_REFRESH_TOKEN` | `oauth.rs` | Optional. If set and no login is stored, it is saved as the YouTube login, so the browser flow is skipped (handy on headless machines). Needs the client id and secret. |
@@ -253,6 +253,7 @@ How the producer behaves:
 - A key has an in-memory daily counter and an optional daily limit.
 - A quota response (`RequestExceeded`) blocks that key for the provider's `retry_after` (5 s) and the call moves on to the next key.
 - An invalid or revoked key (`RequestUnauthorized`) is disabled until tomorrow and the call moves on, so one bad key never fails a job.
+- When every key is disabled or over its limit for more than a minute, `acquire` returns `None` and the job fails with a clear message; the queue retries it later.
 - A temporary service failure (`Unavailable`: HTTP 500/502/503/504, Gemini "UNAVAILABLE" / "high demand") is the same on every key, so keys are not blocked: the same request is retried after 2 s, 4 s and 8 s (and Gemini tries `GEMINI_FALLBACK_MODEL` if set). If it still fails, the job fails and the queue retries it later with its own backoff.
 - An account-specific refusal (`KeyRejected`, e.g. an ElevenLabs `voice_not_found` for a voice that lives on another account) skips that key for an hour and tries the next one.
 - Other errors count as failures for a circuit breaker: 5 failures in a row open it for 60 seconds, during which `acquire` returns `None` (the job fails and is retried with backoff). Any successful call closes it.

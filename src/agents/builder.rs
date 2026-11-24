@@ -246,7 +246,7 @@ async fn text_to_image(
         .acquire(&provider)
         .await
         .ok_or_else(|| {
-            format!("Provider not found")
+            "Cloudflare unavailable: no usable CF_WORKER_KEY_n/CF_WORKER_ACCOUNT_n (or all keys blocked)".to_string()
         })?;
 
     let image = guard

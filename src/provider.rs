@@ -119,6 +119,9 @@ pub enum ProviderError {
     ClientResponse { client: String, error: String },
 }
 
+/// `acquire` waits at most this long for a blocked key; longer = give up.
+const MAX_ACQUIRE_WAIT_SECS: u64 = 60;
+
 /// In-call retries for `Unavailable` before the error goes back to the agent
 /// (whose job is then retried with the queue's longer backoff).
 const TRANSIENT_RETRIES: u32 = 3;
@@ -203,6 +206,11 @@ pub trait ProviderClient: Send + Sync {
     /// Errors tied to one key's account rather than to the request
     /// (see `ProviderError::KeyRejected`). Default: none.
     fn is_key_specific_error(&self, _status: u16, _body: &str) -> bool {
+        false
+    }
+
+    /// True if every key also needs `{PREFIX}_ACCOUNT_n` (e.g. Cloudflare account id).
+    fn requires_account(&self) -> bool {
         false
     }
 
@@ -320,6 +328,7 @@ impl ProviderManager {
     ) {
         let provider = client.provider();
         let config = client.config();
+        let requires_account = client.requires_account();
 
         let runtime = Arc::new(Mutex::new(ProviderRuntime {
             config,
@@ -343,7 +352,7 @@ impl ProviderManager {
             map.insert(provider.clone(), runtime);
         }
 
-        self.load_keys_from_env(&provider, &config, env_prefix).await;
+        self.load_keys_from_env(&provider, &config, env_prefix, requires_account).await;
     }
 
     pub async fn acquire(&self, provider: &Provider) -> Option<ProviderGuard> {
@@ -431,6 +440,23 @@ impl ProviderManager {
                     client: client.clone(),
                     manager: self.clone(),
                 });
+            }
+
+            // No usable key right now. If the soonest one frees up later than
+            // MAX_ACQUIRE_WAIT_SECS (disabled until tomorrow, daily limit), return
+            // None so the job fails and the queue retries it with its backoff,
+            // instead of blocking this agent for hours.
+            let soonest = state.keys
+                .iter()
+                .map(|k| {
+                    let over_limit = k.daily_limit.is_some_and(|l| k.daily_used >= l);
+                    if over_limit { Self::next_day_timestamp() } else { k.blocked_until }
+                })
+                .min()
+                .unwrap_or(now);
+            if soonest.saturating_sub(now) > MAX_ACQUIRE_WAIT_SECS {
+                eprintln!("🔴 [{}] all keys are blocked or over their daily limit", provider);
+                return None;
             }
 
             // Release the lock before repeating/waiting
@@ -532,6 +558,14 @@ impl ProviderManager {
         }
     }
     
+    /// 1-based position of a key, for logs (never log the key itself).
+    async fn key_number(&self, provider: &Provider, api_key: &str) -> usize {
+        let map = self.inner.read().await;
+        let Some(mutex) = map.get(provider) else { return 0 };
+        let runtime = mutex.lock().await;
+        runtime.state.keys.iter().position(|k| k.credential.api_key == api_key).map(|i| i + 1).unwrap_or(0)
+    }
+
     async fn count_key(
         &self,
         provider: &Provider,
@@ -618,24 +652,45 @@ impl ProviderManager {
         provider: &Provider,
         config: &ProviderConfig,
         prefix: &str,
+        requires_account: bool,
     ) {
         let mut i = 1;
+        let mut loaded = 0;
         loop {
             let key_name = format!("{}_KEY_{}", prefix, i);
             let Ok(api_key) = std::env::var(&key_name) else {
                 break;
             };
+            i += 1;
 
-            let account_name = format!("{}_ACCOUNT_{}", prefix, i);
-            let account_id = std::env::var(&account_name).ok();
+            // An empty `KEY_n=` line in .env is a placeholder, not a key.
+            let api_key = api_key.trim().to_string();
+            if api_key.is_empty() {
+                println!("⚠️  [{}] {} is empty, skipped", provider, key_name);
+                continue;
+            }
+
+            let account_name = format!("{}_ACCOUNT_{}", prefix, i - 1);
+            let account_id = std::env::var(&account_name)
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty());
+
+            if requires_account && account_id.is_none() {
+                eprintln!("🔴 [{}] {} is set but {} is missing or empty, key skipped", provider, key_name, account_name);
+                continue;
+            }
 
             self.add_key(
                 provider,
                 config,
                 ApiCredential { api_key, account_id },
             ).await;
+            loaded += 1;
+        }
 
-            i += 1;
+        if loaded == 0 {
+            println!("⚠️  [{}] no usable keys ({}_KEY_1, ...): this provider is disabled", provider, prefix);
         }
     }
 
@@ -716,7 +771,12 @@ impl ProviderGuard {
                     }
                     // Invalid/revoked key: park it until tomorrow so it stops being picked.
                     ProviderError::RequestUnauthorized { .. } => {
-                        eprintln!("🔴 [{}] a key was rejected as unauthorized; disabled until tomorrow", self.provider);
+                        eprintln!(
+                            "🔴 [{}] key #{} rejected as unauthorized, disabled until tomorrow: {}",
+                            self.provider,
+                            self.manager.key_number(&self.provider, &credential.api_key).await,
+                            e,
+                        );
                         self.manager.block_until_tomorrow(self.provider.clone(), &credential.api_key).await;
                         last_error = Some(e);
                     }
@@ -870,6 +930,52 @@ mod tests {
         let guard = manager.acquire(&Provider::CFWorker).await.unwrap();
         assert!(matches!(guard.call(req()).await, Err(ProviderError::Unavailable { .. })));
         assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1 + TRANSIENT_RETRIES);
+    }
+
+    struct NeedsAccount;
+
+    #[async_trait::async_trait]
+    impl ProviderClient for NeedsAccount {
+        fn provider(&self) -> Provider { Provider::CFWorker }
+        fn config(&self) -> ProviderConfig {
+            ProviderConfig { daily_limit: None, retry_after: 5, reset_daily: false, reset_monthly: false, reset_time: None }
+        }
+        fn requires_account(&self) -> bool { true }
+        async fn call(&self, _: &ProviderRequest, c: &ApiCredential) -> Result<ProviderResponse, ProviderError> {
+            Ok(ProviderResponse::Text(c.api_key.clone()))
+        }
+        fn is_auth_error(&self, _: u16, _: &str) -> bool { false }
+        fn is_quota_error(&self, _: u16, _: &str) -> bool { false }
+    }
+
+    #[tokio::test]
+    async fn empty_and_incomplete_keys_are_skipped() {
+        // Like a .env with KEY_2/ACCOUNT_2 left empty and KEY_3 without an account.
+        std::env::set_var("VS_TEST_SKIP_KEY_1", "good");
+        std::env::set_var("VS_TEST_SKIP_ACCOUNT_1", "acc");
+        std::env::set_var("VS_TEST_SKIP_KEY_2", "");
+        std::env::set_var("VS_TEST_SKIP_ACCOUNT_2", "");
+        std::env::set_var("VS_TEST_SKIP_KEY_3", "no-account");
+
+        let manager = ProviderManager::new();
+        manager.register_with_keys(Arc::new(NeedsAccount), 10, "VS_TEST_SKIP").await;
+        assert_eq!(manager.count_key(&Provider::CFWorker).await, 1);
+        for _ in 0..3 {
+            let guard = manager.acquire(&Provider::CFWorker).await.unwrap();
+            assert_eq!(guard.credential.api_key, "good");
+        }
+    }
+
+    #[tokio::test]
+    async fn acquire_gives_up_when_all_keys_are_disabled() {
+        let manager = ProviderManager::new();
+        manager.register_with_keys(Arc::new(NeedsAccount), 10, "VS_TEST_UNSET").await;
+        manager.add_key(&Provider::CFWorker, &NeedsAccount.config(), ApiCredential { api_key: "k".into(), account_id: Some("a".into()) }).await;
+        manager.block_until_tomorrow(Provider::CFWorker, "k").await;
+
+        let started = std::time::Instant::now();
+        assert!(manager.acquire(&Provider::CFWorker).await.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "must not wait for tomorrow");
     }
 
     #[tokio::test]
