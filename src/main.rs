@@ -70,7 +70,7 @@ impl AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {   
     dotenvy::dotenv().ok(); 
-    println!("🚀 Sentinel System v1.0 - AI Video Engine Startup");
+    println!("🚀 Video Studio v{}", env!("CARGO_PKG_VERSION"));
 
     let state = Arc::new(AppState::build().await?);
 
